@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: var(--figma-color-bg, #ffffff);
+    --bg-2: var(--figma-color-bg-secondary, #f5f5f5);
+    --text: var(--figma-color-text, #111111);
+    --muted: var(--figma-color-text-secondary, #6b6b6b);
+    --border: var(--figma-color-border, #e0e0e0);
+    --brand: var(--figma-color-bg-brand, #0d99ff);
+    --onbrand: var(--figma-color-text-onbrand, #ffffff);
+    --danger: var(--figma-color-text-danger, #d92d20);
+    --ok: #14a44d;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--text);
+    font: 11px/1.5 "Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  h1 {
+    font-size: 12px;
+    font-weight: 600;
+    margin: 0 0 2px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); opacity: .5; }
+  .dot.on { background: var(--ok); opacity: 1; }
+  .dot.bad { background: var(--danger); opacity: 1; }
+  .sub { color: var(--muted); margin: 0 0 7px; font-size: 10px; }
+  label { display: block; color: var(--muted); font-size: 10px; margin-bottom: 3px; }
+  input {
+    width: 100%;
+    padding: 5px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    outline: none;
+  }
+  input:focus { border-color: var(--brand); }
+  button {
+    font: inherit;
+    font-weight: 500;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+    color: var(--text);
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary {
+    width: 100%;
+    margin-top: 7px;
+    padding: 7px;
+    background: var(--brand);
+    border-color: transparent;
+    color: var(--onbrand);
+    font-size: 12px;
+  }
+  .card {
+    margin-top: 7px;
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-2);
+  }
+  .card .row { display: flex; justify-content: space-between; gap: 8px; }
+  .card .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .meta {
+    color: var(--muted); font-size: 10px; margin-top: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .state { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+  .spinner {
+    width: 8px; height: 8px; border-radius: 50%;
+    border: 1.5px solid var(--border); border-top-color: var(--brand);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .log-title { margin: 7px 0 3px; font-size: 10px; color: var(--muted); }
+  .log {
+    flex: 1;
+    min-height: 42px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 7px;
+    background: var(--bg);
+    font: 10px/1.55 ui-monospace, "SF Mono", Consolas, monospace;
+    color: var(--muted);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .log b { color: var(--text); font-weight: 500; }
+  .log .err { color: var(--danger); }
+  .hidden { display: none !important; }
+  .actions { display: flex; gap: 6px; margin-top: 6px; }
+  .actions button { flex: 1; }
+</style>
+</head>
+<body>
+  <h1>PS 桥接 <span class="dot" id="bridgeDot"></span><span class="dot" id="psDot"></span></h1>
+  <p class="sub">选中图片 → 发送到 PS → 点「保存回传」</p>
+
+  <label for="server">桥接服务地址</label>
+  <input id="server" spellcheck="false" value="http://localhost:8765">
+
+  <button class="primary" id="send">发送选中到 PS</button>
+
+  <div class="card" id="card">
+    <div class="row">
+      <span class="name" id="taskName">未选择</span>
+      <span class="state" id="taskState">待发送</span>
+    </div>
+    <div class="meta" id="taskMeta">—</div>
+  </div>
+
+  <div class="actions hidden" id="actions">
+    <button id="cancel">停止等待</button>
+  </div>
+
+  <div class="log-title">运行日志</div>
+  <div class="log" id="log"></div>
+
+<script>
+(function () {
+  var serverInput = document.getElementById('server');
+  var sendBtn = document.getElementById('send');
+  var cancelBtn = document.getElementById('cancel');
+  var actions = document.getElementById('actions');
+  var logEl = document.getElementById('log');
+  var taskName = document.getElementById('taskName');
+  var taskMeta = document.getElementById('taskMeta');
+  var taskState = document.getElementById('taskState');
+  var bridgeDot = document.getElementById('bridgeDot');
+  var psDot = document.getElementById('psDot');
+
+  var selection = { count: 0, name: '' };
+  var runToken = 0;
+  var busy = false;
+  var activeJobId = null; // 正在等待的任务，取消时要通知服务端释放
+
+  // 与 bridge/server.py、ps-cep/js/main.js 保持一致
+  var PORTS = [8765, 8766, 8767, 8768, 8769, 8770, 8771, 8772, 8773, 8774];
+
+  // 插件 iframe 里 localStorage 可能抛 SecurityError，降级到内存
+  var memoryStore = {};
+  var store = {
+    get: function (k) {
+      try { return localStorage.getItem(k); } catch (e) { return k in memoryStore ? memoryStore[k] : null; }
+    },
+    set: function (k, v) {
+      try { localStorage.setItem(k, v); } catch (e) { memoryStore[k] = v; }
+    }
+  };
+
+  // Figma 的 networkAccess 不允许 IP 字面量，统一用 localhost
+  serverInput.value = (store.get('ps-bridge-server') || 'http://localhost:8765').replace('127.0.0.1', 'localhost');
+  serverInput.addEventListener('change', function () {
+    store.set('ps-bridge-server', server());
+  });
+
+  function server() {
+    return (serverInput.value || 'http://localhost:8765').trim().replace(/\/+$/, '');
+  }
+
+  function log(text, isError) {
+    var line = document.createElement('div');
+    line.className = isError ? 'err' : '';
+    var time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    line.innerHTML = '<b>' + time + '</b>  ' + escapeHtml(text);
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; });
+  }
+
+  function setState(text, spinning) {
+    taskState.innerHTML = spinning
+      ? '<span class="spinner"></span>' + escapeHtml(text)
+      : escapeHtml(text);
+  }
+
+  function setBusy(value) {
+    busy = value;
+    sendBtn.disabled = value;
+    actions.classList.toggle('hidden', !value);
+  }
+
+  function b64ToBytes(b64) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  function bytesToB64(bytes) {
+    var chunk = 0x8000;
+    var parts = [];
+    for (var i = 0; i < bytes.length; i += chunk) {
+      parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + chunk)));
+    }
+    return btoa(parts.join(''));
+  }
+
+  async function checkHealth() {
+    // 桥接服务会自动避开被占用的端口（比如 8765 被代理软件占了），这里依次试
+    var bases = [server()];
+    for (var i = 0; i < PORTS.length; i++) {
+      var candidate = 'http://localhost:' + PORTS[i];
+      if (bases.indexOf(candidate) === -1) bases.push(candidate);
+    }
+
+    for (var j = 0; j < bases.length; j++) {
+      try {
+        var res = await fetch(bases[j] + '/api/health', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var data = await res.json();
+        if (!data || !data.ok) throw new Error('不是桥接服务');
+
+        if (bases[j] !== server()) {
+          serverInput.value = bases[j];
+          store.set('ps-bridge-server', bases[j]);
+          log('已连接到桥接服务 ' + bases[j]);
+        }
+
+        bridgeDot.className = 'dot on';
+        psDot.className = 'dot ' + (data.psOnline ? 'on' : 'bad');
+        psDot.title = data.psOnline ? 'PS 面板在线' : 'PS 面板未连接';
+        return;
+      } catch (err) {
+        // 端口不通或不是我们的服务，继续试下一个
+      }
+    }
+
+    bridgeDot.className = 'dot bad';
+    psDot.className = 'dot bad';
+  }
+
+  async function upload(meta, dataB64) {
+    var token = ++runToken;
+    var base = server();
+    setBusy(true);
+    taskName.textContent = meta.nodeName || meta.targetName || '未命名';
+
+    var blob = new Blob([b64ToBytes(dataB64)], { type: 'image/png' });
+    var finalMeta = Object.assign({}, meta, { client: 'figma' });
+    log('取到源图 ' + meta.imageWidth + '×' + meta.imageHeight + '（' + meta.mode + '）');
+
+    taskMeta.textContent = finalMeta.imageWidth + '×' + finalMeta.imageHeight + ' px · 画布 ' +
+      meta.nodeWidth + '×' + meta.nodeHeight;
+
+    setState('发送中', true);
+    var created;
+    try {
+      var res = await fetch(base + '/api/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(finalMeta)
+      });
+      if (!res.ok) throw new Error('创建任务失败 ' + res.status);
+      created = await res.json();
+      activeJobId = created.id;
+    } catch (err) {
+      setState('发送失败');
+      log('连接桥接服务失败：' + err.message + '。请确认已双击运行「启动桥接.bat」', true);
+      setBusy(false);
+      return;
+    }
+
+    try {
+      var put = await fetch(base + '/api/jobs/' + created.id + '/image', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'image/png' },
+        body: blob
+      });
+      if (!put.ok) throw new Error('上传失败 ' + put.status);
+    } catch (err) {
+      setState('上传失败');
+      log('上传图片失败：' + err.message, true);
+      setBusy(false);
+      return;
+    }
+
+    log('任务 ' + created.id + ' 已发送，等待 PS 回传');
+    setState('等待 PS 编辑', true);
+
+    for (var i = 0; i < 240; i++) {
+      if (token !== runToken) {
+        log('已停止等待');
+        return;
+      }
+      var status;
+      try {
+        var sr = await fetch(base + '/api/jobs/' + created.id + '/status?wait=25', { cache: 'no-store' });
+        status = await sr.json();
+      } catch (err) {
+        await sleep(2000);
+        continue;
+      }
+
+      if (status.status === 'ready') {
+        setState('取回结果', true);
+        var rr = await fetch(base + '/api/jobs/' + created.id + '/result', { cache: 'no-store' });
+        var buf = await rr.arrayBuffer();
+        parent.postMessage({
+          pluginMessage: {
+            type: 'apply-result',
+            meta: {
+              targetId: meta.targetId,
+              targetName: meta.targetName,
+              paintIndex: meta.paintIndex,
+              fallback: meta.fallback,
+              imageWidth: finalMeta.imageWidth,
+              imageHeight: finalMeta.imageHeight,
+              nodeWidth: meta.nodeWidth,
+              nodeHeight: meta.nodeHeight
+            },
+            data: bytesToB64(new Uint8Array(buf))
+          }
+        }, '*');
+        await fetch(base + '/api/jobs/' + created.id + '/ack', { method: 'POST' });
+        activeJobId = null;
+        setState('已回写');
+        log('已取回 ' + (buf.byteLength / 1024).toFixed(0) + 'KB，写回画布');
+        setBusy(false);
+        return;
+      }
+
+      if (status.status === 'failed') {
+        activeJobId = null;
+        setState('PS 端失败');
+        log(status.error || 'PS 端处理失败', true);
+        setBusy(false);
+        return;
+      }
+    }
+
+    setState('等待超时');
+    log('等待超时，任务 ' + created.id + ' 可能还在 PS 里', true);
+    setBusy(false);
+  }
+
+  function sleep(ms) {
+    return new Promise(function (r) { setTimeout(r, ms); });
+  }
+
+  sendBtn.addEventListener('click', function () {
+    if (!selection.count) {
+      log('请先在画布上选中一张图片或画框', true);
+      return;
+    }
+    if (busy) return;
+    taskMeta.textContent = '正在取源图…';
+    setState('读取中', true);
+    parent.postMessage({ pluginMessage: { type: 'send-request' } }, '*');
+  });
+
+  cancelBtn.addEventListener('click', function () {
+    runToken++;
+    var id = activeJobId;
+    activeJobId = null;
+    setBusy(false);
+    setState('已停止');
+    if (id) {
+      // 让服务端把任务标记为失败，否则 PS 端会一直被这个任务「占着」
+      fetch(server() + '/api/jobs/' + id + '/fail', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: '已在 Figma 端取消' })
+      }).catch(function () {});
+    }
+  });
+
+  window.onmessage = function (event) {
+    var msg = event.data && event.data.pluginMessage;
+    if (!msg) return;
+
+    if (msg.type === 'boot') {
+      log('插件已启动 · 页面「' + msg.page + '」· 选中 ' + msg.count + ' 个 · 顶层对象 ' + msg.total + ' 个');
+      if (!msg.count) log('如果画布上确实选中了对象，把这段告诉我', true);
+      return;
+    }
+
+    if (msg.type === 'selection') {
+      selection = msg;
+      if (!busy) {
+        taskName.textContent = msg.count ? msg.name : '未选择';
+        if (!msg.count) {
+          taskMeta.textContent = '请选中一个带图片的图层或画框';
+          setState('待发送');
+        }
+      }
+      return;
+    }
+
+    if (msg.type === 'send-payload') {
+      upload(msg.meta, msg.data).catch(function (err) {
+        log(err.message, true);
+        setState('出错');
+        setBusy(false);
+      });
+      return;
+    }
+
+    if (msg.type === 'error' || msg.type === 'diag') {
+      log(msg.message, true);
+      setState('出错');
+      setBusy(false);
+    }
+  };
+
+  // 面板打开后主动问一次当前选中（有些情况 selectionchange 不会补发）
+  parent.postMessage({ pluginMessage: { type: 'request-selection' } }, '*');
+
+  checkHealth();
+  setInterval(checkHealth, 5000);
+})();
+</script>
+</body>
+</html>

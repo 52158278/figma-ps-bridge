@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 桥接服务运行时产生的图片缓存（本地临时数据）
+bridge/.data/
+
+# UXP 旧版面板，已废弃，改由 ps-cep/ 承担
+ps-plugin/
+
+# 打包产物
+*.zip
+
+# 系统 / 编辑器
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
