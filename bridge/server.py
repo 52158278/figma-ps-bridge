@@ -40,6 +40,10 @@ JOBS_LOCK = threading.Condition()
 LAST_PS_SEEN = 0.0
 SETTLED = ("ready", "failed", "done")
 
+JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
+# 已完成/失败的任务只留 7 天，避免任务表无限增长
+JOB_TTL_SEC = 7 * 24 * 3600
+
 CORS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
@@ -67,6 +71,52 @@ def result_path(job_id):
     return os.path.join(job_dir(job_id), "result.png")
 
 
+def save_jobs_locked():
+    """把任务表落盘（调用方需持有 JOBS_LOCK），服务重启后还能接着用。"""
+    payload = {"version": 1, "jobs": list(JOBS.values())}
+    tmp = JOBS_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        os.replace(tmp, JOBS_FILE)
+    except OSError:
+        pass
+
+
+def load_jobs():
+    """启动时恢复上次的任务表。"""
+    try:
+        with open(JOBS_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return
+    items = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return
+    now = time.time()
+    with JOBS_LOCK:
+        for job in items:
+            if not isinstance(job, dict) or not job.get("id"):
+                continue
+            created = job.get("createdAt") or now_ms()
+            updated = job.get("updatedAt") or created
+            # 已完成/失败的任务超过保留期就丢掉
+            if job.get("status") in SETTLED and now - updated / 1000.0 > JOB_TTL_SEC:
+                continue
+            job["createdAt"] = created
+            job["updatedAt"] = updated
+            job.setdefault("meta", {})
+            job.setdefault("error", None)
+            # 上次退出时还停在 editing 的任务，重启后放回 pending 方便重新接上
+            if job.get("status") == "editing":
+                job["status"] = "pending"
+                job["updatedAt"] = now_ms()
+            job["hasSource"] = os.path.exists(source_path(job["id"]))
+            job["hasResult"] = os.path.exists(result_path(job["id"]))
+            JOBS[job["id"]] = job
+        save_jobs_locked()
+
+
 def public_job(job):
     return {
         "id": job["id"],
@@ -86,6 +136,7 @@ def set_status(job, status, error=None):
         job["updatedAt"] = now_ms()
         if error is not None:
             job["error"] = error
+        save_jobs_locked()
         JOBS_LOCK.notify_all()
 
 
@@ -113,9 +164,10 @@ def create_job(meta):
         "hasResult": False,
         "error": None,
     }
+    os.makedirs(job_dir(job_id), exist_ok=True)
     with JOBS_LOCK:
         JOBS[job_id] = job
-    os.makedirs(job_dir(job_id), exist_ok=True)
+        save_jobs_locked()
     return job
 
 
@@ -303,6 +355,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self.send_json(200, {"job": None, "busy": True})
                     editing["status"] = "pending"
                     editing["updatedAt"] = now_ms()
+                    save_jobs_locked()
                 candidates = sorted(
                     (j for j in JOBS.values() if j["status"] == "pending"),
                     key=lambda j: j["createdAt"],
@@ -312,6 +365,7 @@ class Handler(BaseHTTPRequestHandler):
                 job = candidates[0]
                 job["status"] = "editing"
                 job["updatedAt"] = now_ms()
+                save_jobs_locked()
                 payload = public_job(job)
             return self.send_json(
                 200, {"job": payload, "sourceUrl": "/api/jobs/%s/image" % job["id"]}
@@ -433,6 +487,8 @@ def bind_server():
 
 def main():
     global PORT
+    # 先恢复上次的任务表，重启后 Figma / PS 还能接着续上
+    load_jobs()
     server, PORT = bind_server()
     print("[ps-bridge] 已启动: http://%s:%s" % (HOST, PORT))
     print("[ps-bridge] Figma 插件与 PS 面板会自动找到这个端口，按 Ctrl+C 结束")

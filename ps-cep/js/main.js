@@ -31,6 +31,8 @@ let autoReceive = true;
 let currentJob = null; // { id, meta, docName }
 let busy = false;
 let running = true;
+let restoreBusy = false;
+const ignoredMarkers = {}; // 已经处理过/已失败的任务，别反复提示
 
 /* ------------------------------ Node 依赖 ------------------------------ */
 
@@ -174,13 +176,27 @@ async function postJson(p, payload) {
 
 /* ------------------------------ ExtendScript ------------------------------ */
 
-function evalScript(script) {
+// PS 弹模态框时 evalScript 会一直不回调，这里加超时避免轮询整体卡死
+function evalScript(script, timeoutMs) {
   return new Promise(function (resolve) {
+    let done = false;
+    const timer = setTimeout(function () {
+      if (done) return;
+      done = true;
+      resolve('ERR:Photoshop 没有响应（可能开着对话框）');
+    }, timeoutMs || 8000);
+
     try {
       window.__adobe_cep__.evalScript(script, function (result) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
         resolve(result == null ? '' : String(result));
       });
     } catch (err) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
       resolve('ERR:' + ((err && err.message) || err));
     }
   });
@@ -194,15 +210,27 @@ function toEsPath(p) {
   return p.replace(/\\/g, '/');
 }
 
-async function openImage(filePath) {
-  const res = await evalScript('figmaBridgeOpenImage(' + esStr(toEsPath(filePath)) + ')');
+/** 读 PSD 里的任务标记，返回 { jobId, docName } 或 null */
+async function readMarker() {
+  const res = await evalScript('figmaBridgeReadMarker()', 1500);
+  if (res.indexOf('OK:') !== 0) return null;
+  const body = res.slice(3);
+  const idx = body.indexOf('|');
+  if (idx <= 0) return null;
+  return { jobId: body.slice(0, idx), docName: body.slice(idx + 1) };
+}
+
+async function openImage(filePath, jobId) {
+  const res = await evalScript(
+    'figmaBridgeOpenImage(' + esStr(toEsPath(filePath)) + ',' + esStr(jobId || '') + ')'
+  );
   if (res.indexOf('OK:') !== 0) throw new Error(res.replace(/^ERR:/, '') || '打开图片失败');
   return res.slice(3);
 }
 
-async function savePngCopy(filePath, docName) {
+async function savePngCopy(filePath, jobId, docName) {
   const res = await evalScript(
-    'figmaBridgeSavePng(' + esStr(toEsPath(filePath)) + ',' + esStr(docName || '') + ')'
+    'figmaBridgeSavePng(' + esStr(toEsPath(filePath)) + ',' + esStr(jobId || '') + ',' + esStr(docName || '') + ')'
   );
   if (res.indexOf('OK:') !== 0) throw new Error(res.replace(/^ERR:/, '') || '导出 PNG 失败');
   return res.slice(3);
@@ -229,6 +257,15 @@ async function receiveJob(job, sourceUrl) {
 
   let tempPath = null;
   try {
+    // PS 里已经开着这个任务的文档（比如 PSD 存过、面板重载过），别再下一遍原图盖掉编辑
+    const marker = await readMarker();
+    if (marker && marker.jobId === job.id) {
+      currentJob.docName = marker.docName;
+      log('PS 里已经开着任务 #' + job.id + ' 的「' + marker.docName + '」，直接接着用');
+      setStatus('等待编辑');
+      return;
+    }
+
     setStatus('下载原图…');
     const buffer = await request('GET', sourceUrl, null);
     log('已下载 ' + Math.round(buffer.length / 1024) + ' KB');
@@ -237,7 +274,7 @@ async function receiveJob(job, sourceUrl) {
     fs.writeFileSync(tempPath, buffer);
 
     setStatus('在 Photoshop 中打开…');
-    const docName = await openImage(tempPath);
+    const docName = await openImage(tempPath, job.id);
     currentJob.docName = docName;
 
     log('已打开「' + docName + '」，编辑完点上面的按钮回传');
@@ -263,7 +300,7 @@ async function saveAndSend() {
   try {
     setStatus('导出 PNG…');
     outPath = path.join(os.tmpdir(), 'figma-' + currentJob.id + '-out-' + Date.now() + '.png');
-    await savePngCopy(outPath, currentJob.docName);
+    await savePngCopy(outPath, currentJob.id, currentJob.docName);
 
     const buffer = fs.readFileSync(outPath);
     if (!buffer || !buffer.length) throw new Error('导出的图片为空');
@@ -287,6 +324,49 @@ async function saveAndSend() {
     }
     busy = false;
     refresh();
+  }
+}
+
+/* ------------------------------ 认出 PSD 里的任务 ------------------------------ */
+
+// 面板重开、或用户自己打开存过的 PSD 时，从文档标记里认出原任务，挂上就能直接回传
+async function restoreFromDocument() {
+  if (!running || busy || currentJob || restoreBusy) return;
+  restoreBusy = true;
+  try {
+    const marker = await readMarker();
+    if (!marker || ignoredMarkers[marker.jobId]) return;
+
+    let job;
+    try {
+      job = await getJson('/api/jobs/' + marker.jobId);
+    } catch (err) {
+      const msg = (err && err.message) || '';
+      if (msg.indexOf('HTTP 404') === 0) {
+        ignoredMarkers[marker.jobId] = true;
+        log('文档「' + marker.docName + '」对应的任务 #' + marker.jobId + ' 已结束，需要重新从 Figma 发送', true);
+      }
+      return;
+    }
+
+    if (busy || currentJob) return;
+
+    const status = job && job.status;
+    if (status === 'pending' || status === 'editing') {
+      currentJob = { id: marker.jobId, meta: job.meta || {}, docName: marker.docName };
+      log('认出「' + marker.docName + '」是任务 #' + marker.jobId + '，可直接点「保存并回传 Figma」');
+      setStatus('等待编辑');
+      refresh();
+      return;
+    }
+
+    // 已经回传过 / 已失败的任务，把标记忽略掉，别反复提示
+    ignoredMarkers[marker.jobId] = true;
+    if (status === 'failed') {
+      log('任务 #' + marker.jobId + ' 已失败，需要重新从 Figma 发送', true);
+    }
+  } finally {
+    restoreBusy = false;
   }
 }
 
@@ -404,5 +484,9 @@ if (!fs) {
   log('Node 模块加载失败：' + ((window.__nodeError && window.__nodeError.message) || '未知错误'), true);
 } else {
   log('面板已加载，服务地址 ' + serverUrl);
-  detectServer().then(loop);
+  detectServer()
+    .then(function () { return restoreFromDocument(); })
+    .then(loop);
+  // 用户随时可能打开/切到存过的 PSD，定期看一眼文档标记
+  setInterval(restoreFromDocument, 3000);
 }

@@ -10,6 +10,8 @@
 figma.showUI(__html__, { width: 300, height: 300, themeColors: true });
 
 const MAX_EXPORT_SCALE = 4;
+// 记住「还在等 PS 回传」的任务，关掉插件/重开 Figma 后还能接着贴回原图层
+const PENDING_KEY = 'pendingJob';
 
 figma.ui.onmessage = async (msg) => {
   try {
@@ -17,6 +19,9 @@ figma.ui.onmessage = async (msg) => {
     if (msg.type === 'send-request') return await handleSendRequest();
     if (msg.type === 'apply-result') return await applyResult(msg);
     if (msg.type === 'request-selection') return pushSelection();
+    if (msg.type === 'find-target') return await locateTarget(msg.targetId);
+    if (msg.type === 'load-pending') return await loadPending();
+    if (msg.type === 'save-pending') return await savePending(msg.value);
     if (msg.type === 'notify') return figma.notify(msg.text, { timeout: 4000, error: !!msg.error });
   } catch (err) {
     const text = String(err && err.message ? err.message : err);
@@ -24,6 +29,60 @@ figma.ui.onmessage = async (msg) => {
     figma.ui.postMessage({ type: 'diag', message: text });
   }
 };
+
+async function loadPending() {
+  let value = null;
+  try {
+    value = await figma.clientStorage.getAsync(PENDING_KEY);
+  } catch (err) {
+    value = null;
+  }
+  figma.ui.postMessage({ type: 'pending-job', value: value || null });
+}
+
+async function savePending(value) {
+  try {
+    if (value) await figma.clientStorage.setAsync(PENDING_KEY, value);
+    else await figma.clientStorage.deleteAsync(PENDING_KEY);
+  } catch (err) {
+    // 存不进去不影响本次流程，只是下次要手动重来
+  }
+  figma.ui.postMessage({ type: 'pending-job', value: value || null });
+}
+
+/** 向上找到节点所在的页面 */
+function pageOf(node) {
+  let cur = node;
+  while (cur && cur.type !== 'PAGE') {
+    cur = 'parent' in cur ? cur.parent : null;
+  }
+  return cur && cur.type === 'PAGE' ? cur : null;
+}
+
+/** 切到所在页面、选中、缩放到能看见 */
+async function ensureVisible(node) {
+  const page = pageOf(node);
+  if (page && page.id !== figma.currentPage.id) {
+    await figma.setCurrentPageAsync(page);
+  }
+  figma.currentPage.selection = [node];
+  figma.viewport.scrollAndZoomIntoView([node]);
+}
+
+/** 「认出原图层」：按保存的 nodeId 找回节点，不依赖当前选中 */
+async function locateTarget(nodeId) {
+  if (!nodeId) {
+    figma.ui.postMessage({ type: 'target-missing', targetId: '', reason: '还没记录过原图层' });
+    return;
+  }
+  const node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) {
+    figma.ui.postMessage({ type: 'target-missing', targetId: nodeId, reason: '原图层已不存在' });
+    return;
+  }
+  await ensureVisible(node);
+  figma.ui.postMessage({ type: 'target-found', targetId: nodeId, name: node.name });
+}
 
 function bootInfo() {
   try {
@@ -177,6 +236,7 @@ async function applyResult(msg) {
       });
     }
     target.fills = fills;
+    if (msg.reveal) await ensureVisible(target);
     figma.notify(`已回写高清图到「${target.name}」`, { timeout: 4000 });
     return;
   }

@@ -108,8 +108,8 @@
   .log b { color: var(--text); font-weight: 500; }
   .log .err { color: var(--danger); }
   .hidden { display: none !important; }
-  .actions { display: flex; gap: 6px; margin-top: 6px; }
-  .actions button { flex: 1; }
+  .actions { display: flex; gap: 5px; margin-top: 6px; }
+  .actions button { flex: 1; padding: 5px 4px; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -130,6 +130,8 @@
   </div>
 
   <div class="actions hidden" id="actions">
+    <button id="locate">认出原图层</button>
+    <button id="resume">继续等待</button>
     <button id="cancel">停止等待</button>
   </div>
 
@@ -140,6 +142,8 @@
 (function () {
   var serverInput = document.getElementById('server');
   var sendBtn = document.getElementById('send');
+  var locateBtn = document.getElementById('locate');
+  var resumeBtn = document.getElementById('resume');
   var cancelBtn = document.getElementById('cancel');
   var actions = document.getElementById('actions');
   var logEl = document.getElementById('log');
@@ -152,7 +156,10 @@
   var selection = { count: 0, name: '' };
   var runToken = 0;
   var busy = false;
-  var activeJobId = null; // 正在等待的任务，取消时要通知服务端释放
+  // 当前任务 { id, meta }；同时写进 clientStorage，插件重开后还能接着续上
+  var job = null;
+  var activeBase = null;      // 探测到的可用桥接服务地址
+  var awaitingPending = false; // 正在等主线程回传 clientStorage 里的任务
 
   // 与 bridge/server.py、ps-cep/js/main.js 保持一致
   var PORTS = [8765, 8766, 8767, 8768, 8769, 8770, 8771, 8772, 8773, 8774];
@@ -199,8 +206,46 @@
 
   function setBusy(value) {
     busy = value;
-    sendBtn.disabled = value;
-    actions.classList.toggle('hidden', !value);
+    renderActions();
+  }
+
+  /** 按当前状态决定按钮显隐 */
+  function renderActions() {
+    var showLocate = !!(job && job.meta && job.meta.targetId);
+    var showResume = !!(job && !busy);
+    var showCancel = !!(job || busy);
+    locateBtn.classList.toggle('hidden', !showLocate);
+    resumeBtn.classList.toggle('hidden', !showResume);
+    cancelBtn.classList.toggle('hidden', !showCancel);
+    actions.classList.toggle('hidden', !(showLocate || showResume || showCancel));
+    sendBtn.disabled = busy || !!job;
+  }
+
+  function renderJob(meta, text, spinning) {
+    if (meta) {
+      taskName.textContent = meta.nodeName || meta.targetName || '未命名';
+      taskMeta.textContent = (meta.imageWidth || '?') + '×' + (meta.imageHeight || '?') + ' px · 画布 ' +
+        (meta.nodeWidth || '?') + '×' + (meta.nodeHeight || '?');
+    }
+    setState(text, spinning);
+    renderActions();
+  }
+
+  /** 把当前任务写进 clientStorage（job 为空则清掉） */
+  function rememberJob() {
+    parent.postMessage({
+      pluginMessage: {
+        type: 'save-pending',
+        value: job ? { jobId: job.id, meta: job.meta, at: Date.now() } : null
+      }
+    }, '*');
+  }
+
+  function clearJob(text) {
+    job = null;
+    rememberJob();
+    setBusy(false);
+    setState(text || '待发送');
   }
 
   function b64ToBytes(b64) {
@@ -219,8 +264,8 @@
     return btoa(parts.join(''));
   }
 
-  async function checkHealth() {
-    // 桥接服务会自动避开被占用的端口（比如 8765 被代理软件占了），这里依次试
+  /** 依次探测候选端口，找到可用的桥接服务就返回 { base, data } */
+  async function findServer() {
     var bases = [server()];
     for (var i = 0; i < PORTS.length; i++) {
       var candidate = 'http://localhost:' + PORTS[i];
@@ -233,40 +278,68 @@
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var data = await res.json();
         if (!data || !data.ok) throw new Error('不是桥接服务');
-
-        if (bases[j] !== server()) {
-          serverInput.value = bases[j];
-          store.set('ps-bridge-server', bases[j]);
-          log('已连接到桥接服务 ' + bases[j]);
-        }
-
-        bridgeDot.className = 'dot on';
-        psDot.className = 'dot ' + (data.psOnline ? 'on' : 'bad');
-        psDot.title = data.psOnline ? 'PS 面板在线' : 'PS 面板未连接';
-        return;
+        return { base: bases[j], data: data };
       } catch (err) {
         // 端口不通或不是我们的服务，继续试下一个
       }
     }
+    return null;
+  }
 
-    bridgeDot.className = 'dot bad';
-    psDot.className = 'dot bad';
+  async function ensureBase() {
+    var found = await findServer();
+    if (!found) {
+      activeBase = null;
+      return null;
+    }
+    if (found.base !== server()) {
+      serverInput.value = found.base;
+      store.set('ps-bridge-server', found.base);
+      log('已连接到桥接服务 ' + found.base);
+    }
+    activeBase = found.base;
+    return activeBase;
+  }
+
+  async function checkHealth() {
+    // 桥接服务会自动避开被占用的端口（比如 8765 被代理软件占了），这里依次试
+    var found = await findServer();
+    if (!found) {
+      bridgeDot.className = 'dot bad';
+      psDot.className = 'dot bad';
+      activeBase = null;
+      return;
+    }
+
+    if (found.base !== server()) {
+      serverInput.value = found.base;
+      store.set('ps-bridge-server', found.base);
+      log('已连接到桥接服务 ' + found.base);
+    }
+    activeBase = found.base;
+
+    bridgeDot.className = 'dot on';
+    psDot.className = 'dot ' + (found.data.psOnline ? 'on' : 'bad');
+    psDot.title = found.data.psOnline ? 'PS 面板在线' : 'PS 面板未连接';
   }
 
   async function upload(meta, dataB64) {
     var token = ++runToken;
-    var base = server();
+    renderJob(meta, '发送中', true);
     setBusy(true);
-    taskName.textContent = meta.nodeName || meta.targetName || '未命名';
 
     var blob = new Blob([b64ToBytes(dataB64)], { type: 'image/png' });
     var finalMeta = Object.assign({}, meta, { client: 'figma' });
     log('取到源图 ' + meta.imageWidth + '×' + meta.imageHeight + '（' + meta.mode + '）');
 
-    taskMeta.textContent = finalMeta.imageWidth + '×' + finalMeta.imageHeight + ' px · 画布 ' +
-      meta.nodeWidth + '×' + meta.nodeHeight;
+    var base = await ensureBase();
+    if (!base) {
+      setBusy(false);
+      setState('连接失败');
+      log('找不到桥接服务。请确认已双击运行「启动桥接.bat」', true);
+      return;
+    }
 
-    setState('发送中', true);
     var created;
     try {
       var res = await fetch(base + '/api/jobs', {
@@ -276,7 +349,6 @@
       });
       if (!res.ok) throw new Error('创建任务失败 ' + res.status);
       created = await res.json();
-      activeJobId = created.id;
     } catch (err) {
       setState('发送失败');
       log('连接桥接服务失败：' + err.message + '。请确认已双击运行「启动桥接.bat」', true);
@@ -294,67 +366,156 @@
     } catch (err) {
       setState('上传失败');
       log('上传图片失败：' + err.message, true);
+      fetch(base + '/api/jobs/' + created.id + '/fail', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: 'Figma 端上传失败' })
+      }).catch(function () {});
       setBusy(false);
       return;
     }
 
+    job = { id: created.id, meta: finalMeta };
+    rememberJob();
+    renderActions();
+
     log('任务 ' + created.id + ' 已发送，等待 PS 回传');
-    setState('等待 PS 编辑', true);
+    await waitForResult(created.id, finalMeta, token);
+  }
+
+  /** 长轮询等 PS 回传；超时不丢任务，下次还能「继续等待」 */
+  async function waitForResult(jobId, meta, token) {
+    setBusy(true);
+    renderJob(null, '等待 PS 编辑', true);
 
     for (var i = 0; i < 240; i++) {
-      if (token !== runToken) {
-        log('已停止等待');
-        return;
+      if (token !== runToken) return;
+      var base = await ensureBase();
+      if (!base) {
+        await sleep(2000);
+        continue;
       }
+
       var status;
       try {
-        var sr = await fetch(base + '/api/jobs/' + created.id + '/status?wait=25', { cache: 'no-store' });
+        var sr = await fetch(base + '/api/jobs/' + jobId + '/status?wait=25', { cache: 'no-store' });
+        if (sr.status === 404) {
+          log('任务 ' + jobId + ' 已不在桥接服务里（可能已过期）', true);
+          clearJob('任务过期');
+          return;
+        }
         status = await sr.json();
       } catch (err) {
+        activeBase = null;
         await sleep(2000);
         continue;
       }
 
       if (status.status === 'ready') {
-        setState('取回结果', true);
-        var rr = await fetch(base + '/api/jobs/' + created.id + '/result', { cache: 'no-store' });
-        var buf = await rr.arrayBuffer();
-        parent.postMessage({
-          pluginMessage: {
-            type: 'apply-result',
-            meta: {
-              targetId: meta.targetId,
-              targetName: meta.targetName,
-              paintIndex: meta.paintIndex,
-              fallback: meta.fallback,
-              imageWidth: finalMeta.imageWidth,
-              imageHeight: finalMeta.imageHeight,
-              nodeWidth: meta.nodeWidth,
-              nodeHeight: meta.nodeHeight
-            },
-            data: bytesToB64(new Uint8Array(buf))
-          }
-        }, '*');
-        await fetch(base + '/api/jobs/' + created.id + '/ack', { method: 'POST' });
-        activeJobId = null;
-        setState('已回写');
-        log('已取回 ' + (buf.byteLength / 1024).toFixed(0) + 'KB，写回画布');
-        setBusy(false);
+        await applyReady(base, jobId, meta);
         return;
       }
 
       if (status.status === 'failed') {
-        activeJobId = null;
-        setState('PS 端失败');
         log(status.error || 'PS 端处理失败', true);
-        setBusy(false);
+        clearJob('PS 端失败');
         return;
       }
     }
 
-    setState('等待超时');
-    log('等待超时，任务 ' + created.id + ' 可能还在 PS 里', true);
     setBusy(false);
+    setState('等待超时');
+    log('等待超时，任务 ' + jobId + ' 可能还在 PS 里；稍后可点「继续等待」', true);
+  }
+
+  /** 取回图片并写回原图层 */
+  async function applyReady(base, jobId, meta) {
+    setState('取回结果', true);
+    try {
+      var rr = await fetch(base + '/api/jobs/' + jobId + '/result', { cache: 'no-store' });
+      if (!rr.ok) throw new Error('取回结果失败 ' + rr.status);
+      var buf = await rr.arrayBuffer();
+
+      parent.postMessage({
+        pluginMessage: {
+          type: 'apply-result',
+          reveal: true,
+          meta: {
+            targetId: meta.targetId,
+            targetName: meta.targetName,
+            paintIndex: meta.paintIndex,
+            fallback: meta.fallback,
+            imageWidth: meta.imageWidth,
+            imageHeight: meta.imageHeight,
+            nodeWidth: meta.nodeWidth,
+            nodeHeight: meta.nodeHeight
+          },
+          data: bytesToB64(new Uint8Array(buf))
+        }
+      }, '*');
+
+      await fetch(base + '/api/jobs/' + jobId + '/ack', { method: 'POST' }).catch(function () {});
+      log('已取回 ' + (buf.byteLength / 1024).toFixed(0) + 'KB，写回原图层');
+      clearJob('已回写');
+    } catch (err) {
+      setBusy(false);
+      setState('取回失败');
+      log(err.message, true);
+    }
+  }
+
+  /** 插件重开后：拿上次记下的任务，接着等或直接贴回 */
+  async function restore(value) {
+    var jobId = value && value.jobId;
+    if (!jobId) return;
+
+    var meta = value.meta || {};
+    job = { id: jobId, meta: meta };
+    renderJob(meta, '检查任务', true);
+    renderActions();
+
+    var token = ++runToken;
+    var base = await ensureBase();
+    if (!base) {
+      setState('未连接');
+      log('暂时连不上桥接服务，恢复后会点「继续等待」重试', true);
+      return;
+    }
+
+    var status;
+    try {
+      var res = await fetch(base + '/api/jobs/' + jobId, { cache: 'no-store' });
+      if (res.status === 404) {
+        log('上次的任务 ' + jobId + ' 已不在桥接服务里（可能已过期）', true);
+        clearJob('任务过期');
+        return;
+      }
+      status = await res.json();
+    } catch (err) {
+      setState('未连接');
+      log('查询任务状态失败：' + err.message, true);
+      return;
+    }
+
+    log('找到上次的任务 ' + jobId + '（' + status.status + '）');
+
+    if (status.status === 'ready') {
+      await applyReady(base, jobId, meta);
+      return;
+    }
+    if (status.status === 'failed') {
+      log(status.error || 'PS 端处理失败', true);
+      clearJob('PS 端失败');
+      return;
+    }
+    if (status.status === 'done') {
+      clearJob('已回写');
+      return;
+    }
+
+    // awaiting-image / pending / editing：接着等
+    log('任务还在 PS 那边，继续等待');
+    await waitForResult(jobId, meta, token);
   }
 
   function sleep(ms) {
@@ -366,21 +527,41 @@
       log('请先在画布上选中一张图片或画框', true);
       return;
     }
-    if (busy) return;
+    if (busy || job) return;
     taskMeta.textContent = '正在取源图…';
     setState('读取中', true);
     parent.postMessage({ pluginMessage: { type: 'send-request' } }, '*');
   });
 
+  // 认出原图层：按保存的 nodeId 定位，不要求当前选中
+  locateBtn.addEventListener('click', function () {
+    if (!job || !job.meta || !job.meta.targetId) {
+      log('还没有可定位的原图层', true);
+      return;
+    }
+    parent.postMessage({ pluginMessage: { type: 'find-target', targetId: job.meta.targetId } }, '*');
+  });
+
+  resumeBtn.addEventListener('click', function () {
+    if (!job || busy) return;
+    var token = ++runToken;
+    waitForResult(job.id, job.meta, token).catch(function (err) {
+      log(err.message, true);
+      setBusy(false);
+    });
+  });
+
   cancelBtn.addEventListener('click', function () {
     runToken++;
-    var id = activeJobId;
-    activeJobId = null;
+    var id = job ? job.id : null;
+    var wasBusy = busy;
+    job = null;
+    rememberJob();
     setBusy(false);
     setState('已停止');
-    if (id) {
+    if (id && wasBusy) {
       // 让服务端把任务标记为失败，否则 PS 端会一直被这个任务「占着」
-      fetch(server() + '/api/jobs/' + id + '/fail', {
+      fetch((activeBase || server()) + '/api/jobs/' + id + '/fail', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ error: '已在 Figma 端取消' })
@@ -400,7 +581,7 @@
 
     if (msg.type === 'selection') {
       selection = msg;
-      if (!busy) {
+      if (!busy && !job) {
         taskName.textContent = msg.count ? msg.name : '未选择';
         if (!msg.count) {
           taskMeta.textContent = '请选中一个带图片的图层或画框';
@@ -419,6 +600,30 @@
       return;
     }
 
+    // clientStorage 里取回上次的任务（只有启动时主动问的那次才处理）
+    if (msg.type === 'pending-job') {
+      if (!awaitingPending) return;
+      awaitingPending = false;
+      if (msg.value) {
+        restore(msg.value).catch(function (err) {
+          log(err.message, true);
+          setState('出错');
+          setBusy(false);
+        });
+      }
+      return;
+    }
+
+    if (msg.type === 'target-found') {
+      log('已选中原图层「' + msg.name + '」');
+      return;
+    }
+
+    if (msg.type === 'target-missing') {
+      log(msg.reason || '找不到原图层', true);
+      return;
+    }
+
     if (msg.type === 'error' || msg.type === 'diag') {
       log(msg.message, true);
       setState('出错');
@@ -429,7 +634,11 @@
   // 面板打开后主动问一次当前选中（有些情况 selectionchange 不会补发）
   parent.postMessage({ pluginMessage: { type: 'request-selection' } }, '*');
 
-  checkHealth();
+  checkHealth().then(function () {
+    // 顺便看看上次有没有没贴完的任务
+    awaitingPending = true;
+    parent.postMessage({ pluginMessage: { type: 'load-pending' } }, '*');
+  });
   setInterval(checkHealth, 5000);
 })();
 </script>
