@@ -107,7 +107,6 @@
   }
   .log b { color: var(--text); font-weight: 500; }
   .log .err { color: var(--danger); }
-  .hidden { display: none !important; }
   .actions { display: flex; gap: 5px; margin-top: 6px; }
   .actions button { flex: 1; padding: 5px 4px; white-space: nowrap; }
 </style>
@@ -129,10 +128,10 @@
     <div class="meta" id="taskMeta">—</div>
   </div>
 
-  <div class="actions hidden" id="actions">
-    <button id="locate">认出原图层</button>
-    <button id="resume">继续等待</button>
-    <button id="cancel">停止等待</button>
+  <div class="actions" id="actions">
+    <button id="locate" title="按记录的位置选中并定位到原图层">认出原图层</button>
+    <button id="resume" title="继续等待 PS 回传结果">继续等待</button>
+    <button id="cancel" title="停止等待这个任务">停止等待</button>
   </div>
 
   <div class="log-title">运行日志</div>
@@ -145,7 +144,6 @@
   var locateBtn = document.getElementById('locate');
   var resumeBtn = document.getElementById('resume');
   var cancelBtn = document.getElementById('cancel');
-  var actions = document.getElementById('actions');
   var logEl = document.getElementById('log');
   var taskName = document.getElementById('taskName');
   var taskMeta = document.getElementById('taskMeta');
@@ -209,15 +207,11 @@
     renderActions();
   }
 
-  /** 按当前状态决定按钮显隐 */
+  /** 按当前状态决定按钮能不能点（按钮常驻，方便随时看见） */
   function renderActions() {
-    var showLocate = !!(job && job.meta && job.meta.targetId);
-    var showResume = !!(job && !busy);
-    var showCancel = !!(job || busy);
-    locateBtn.classList.toggle('hidden', !showLocate);
-    resumeBtn.classList.toggle('hidden', !showResume);
-    cancelBtn.classList.toggle('hidden', !showCancel);
-    actions.classList.toggle('hidden', !(showLocate || showResume || showCancel));
+    locateBtn.disabled = !(job && job.meta && job.meta.targetId);
+    resumeBtn.disabled = !(job && !busy);
+    cancelBtn.disabled = !(job || busy);
     sendBtn.disabled = busy || !!job;
   }
 
@@ -521,6 +515,9 @@
   function sleep(ms) {
     return new Promise(function (r) { setTimeout(r, ms); });
   }
+
+  // 面板一打开就按「无任务」把按钮置灰
+  renderActions();
 
   sendBtn.addEventListener('click', function () {
     if (!selection.count) {
