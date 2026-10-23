@@ -364,6 +364,10 @@ async function restoreFromDocument() {
     ignoredMarkers[marker.jobId] = true;
     if (status === 'failed') {
       log('任务 #' + marker.jobId + ' 已失败，需要重新从 Figma 发送', true);
+    } else if (status === 'ready') {
+      log('「' + marker.docName + '」的结果已在 Figma 那边等着贴；改完想再传，请在 Figma 重新发送一次');
+    } else if (status === 'done') {
+      log('「' + marker.docName + '」是任务 #' + marker.jobId + ' 的存档，这次已经回传完成；再改想传回 Figma，请在 Figma 重新发送一次');
     }
   } finally {
     restoreBusy = false;
