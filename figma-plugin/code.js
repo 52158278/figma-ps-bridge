@@ -258,5 +258,7 @@ async function applyResult(msg) {
 
   figma.currentPage.selection = [rect];
   figma.viewport.scrollAndZoomIntoView([rect]);
+  // 告诉面板这张新图层的 id：以后再回传就直接覆盖它，不会一层层堆
+  figma.ui.postMessage({ type: 'fallback-created', targetId: rect.id, name: rect.name });
   figma.notify('原节点不是图片填充，已生成新图层', { timeout: 5000 });
 }

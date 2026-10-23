@@ -41,8 +41,8 @@ LAST_PS_SEEN = 0.0
 SETTLED = ("ready", "failed", "done")
 
 JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
-# 已完成/失败的任务只留 7 天，避免任务表无限增长
-JOB_TTL_SEC = 7 * 24 * 3600
+# 已完成/失败的任务留 30 天：PS 里存过的 PSD 隔很久再打开也能认出原图层
+JOB_TTL_SEC = 30 * 24 * 3600
 
 CORS = {
     "Access-Control-Allow-Origin": "*",

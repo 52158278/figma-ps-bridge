@@ -28,7 +28,7 @@ const el = {
 
 let serverUrl = DEFAULT_SERVER;
 let autoReceive = true;
-let currentJob = null; // { id, meta, docName }
+let currentJob = null; // { id, meta, docName, sent }
 let busy = false;
 let running = true;
 let restoreBusy = false;
@@ -105,7 +105,8 @@ function refresh() {
   }
   el.save.disabled = busy || !currentJob;
   el.cancel.disabled = busy || !currentJob;
-  el.pull.disabled = busy || !!currentJob;
+  // 手上挂的任务已经回传过（或是存档）时，允许再收新任务
+  el.pull.disabled = busy || !!(currentJob && !currentJob.sent);
 }
 
 /* ------------------------------ HTTP（Node） ------------------------------ */
@@ -249,7 +250,7 @@ async function failJob(message) {
 
 async function receiveJob(job, sourceUrl) {
   busy = true;
-  currentJob = { id: job.id, meta: job.meta || {}, docName: null };
+  currentJob = { id: job.id, meta: job.meta || {}, docName: null, sent: false };
   refresh();
 
   const m = currentJob.meta;
@@ -298,6 +299,16 @@ async function saveAndSend() {
 
   let outPath = null;
   try {
+    // 面板挂的任务可能和当前文档不是同一个（同时开着多个 PSD），以文档里的标记为准
+    const marker = await readMarker();
+    if (!marker) throw new Error('当前文档不是从 Figma 发来的（没有任务标记），无法回传');
+    if (marker.jobId !== currentJob.id) {
+      const job = await getJson('/api/jobs/' + marker.jobId);
+      currentJob = { id: marker.jobId, meta: job.meta || {}, docName: marker.docName, sent: false };
+      log('当前文档是任务 #' + marker.jobId + '，按这个任务回传');
+      refresh();
+    }
+
     setStatus('导出 PNG…');
     outPath = path.join(os.tmpdir(), 'figma-' + currentJob.id + '-out-' + Date.now() + '.png');
     await savePngCopy(outPath, currentJob.id, currentJob.docName);
@@ -308,9 +319,10 @@ async function saveAndSend() {
     setStatus('回传到 Figma…');
     await request('PUT', '/api/jobs/' + currentJob.id + '/result', buffer, 'image/png');
 
-    log('已回传 ' + Math.round(buffer.length / 1024) + ' KB 到 Figma');
-    setStatus('已回传 Figma');
-    currentJob = null;
+    log('已回传 ' + Math.round(buffer.length / 1024) + ' KB，Figma 会自动覆盖同一图层');
+    setStatus('已回传 · 改完可再传');
+    // 不回传后就撒手：留着任务，改完再点一次就能再覆盖
+    currentJob.sent = true;
   } catch (err) {
     log('回传失败：' + ((err && err.message) || err), true);
     setStatus('回传失败');
@@ -330,12 +342,17 @@ async function saveAndSend() {
 /* ------------------------------ 认出 PSD 里的任务 ------------------------------ */
 
 // 面板重开、或用户自己打开存过的 PSD 时，从文档标记里认出原任务，挂上就能直接回传
+// 已回写过的任务也照样挂上：改完再传，Figma 会覆盖同一图层
 async function restoreFromDocument() {
-  if (!running || busy || currentJob || restoreBusy) return;
+  if (!running || busy || restoreBusy) return;
+  // 手上还有个没回传的任务时别被当前文档抢走
+  if (currentJob && !currentJob.sent) return;
+
   restoreBusy = true;
   try {
     const marker = await readMarker();
     if (!marker || ignoredMarkers[marker.jobId]) return;
+    if (currentJob && currentJob.id === marker.jobId) return;
 
     let job;
     try {
@@ -344,31 +361,32 @@ async function restoreFromDocument() {
       const msg = (err && err.message) || '';
       if (msg.indexOf('HTTP 404') === 0) {
         ignoredMarkers[marker.jobId] = true;
-        log('文档「' + marker.docName + '」对应的任务 #' + marker.jobId + ' 已结束，需要重新从 Figma 发送', true);
+        log('文档「' + marker.docName + '」对应的任务 #' + marker.jobId + ' 已过期，需要重新从 Figma 发送', true);
       }
       return;
     }
 
-    if (busy || currentJob) return;
+    if (busy) return;
 
     const status = job && job.status;
+    currentJob = { id: marker.jobId, meta: (job && job.meta) || {}, docName: marker.docName, sent: false };
+
     if (status === 'pending' || status === 'editing') {
-      currentJob = { id: marker.jobId, meta: job.meta || {}, docName: marker.docName };
       log('认出「' + marker.docName + '」是任务 #' + marker.jobId + '，可直接点「保存并回传 Figma」');
       setStatus('等待编辑');
-      refresh();
-      return;
+    } else if (status === 'done' || status === 'ready') {
+      currentJob.sent = true;
+      log('认出「' + marker.docName + '」是任务 #' + marker.jobId + '（之前已回写过）；改完再传会覆盖 Figma 里的同一图层');
+      setStatus('已回写 · 可再传');
+    } else if (status === 'failed') {
+      currentJob.sent = true;
+      log('认出「' + marker.docName + '」是任务 #' + marker.jobId + '（上次回传失败）；改好后可直接再传');
+      setStatus('上次失败 · 可重传');
+    } else {
+      log('认出「' + marker.docName + '」是任务 #' + marker.jobId + '，等 Figma 把原图传上来');
+      setStatus('等待原图');
     }
-
-    // 已经回传过 / 已失败的任务，把标记忽略掉，别反复提示
-    ignoredMarkers[marker.jobId] = true;
-    if (status === 'failed') {
-      log('任务 #' + marker.jobId + ' 已失败，需要重新从 Figma 发送', true);
-    } else if (status === 'ready') {
-      log('「' + marker.docName + '」的结果已在 Figma 那边等着贴；改完想再传，请在 Figma 重新发送一次');
-    } else if (status === 'done') {
-      log('「' + marker.docName + '」是任务 #' + marker.jobId + ' 的存档，这次已经回传完成；再改想传回 Figma，请在 Figma 重新发送一次');
-    }
+    refresh();
   } finally {
     restoreBusy = false;
   }
@@ -405,16 +423,21 @@ async function detectServer() {
 }
 
 async function pollOnce() {
-  // 自动接收关闭时只发心跳，避免把任务「抢」成 editing 却没人处理
-  if (!autoReceive || busy || currentJob) {
+  // 手上挂着还没回传的任务时只发心跳，避免把它「抢」成 editing 却没人处理
+  if (busy || (currentJob && !currentJob.sent)) {
     await getJson('/api/health');
-    if (!busy && !currentJob) setStatus('已连接 · 等待 Figma 发送');
     return;
   }
+  if (!autoReceive) {
+    await getJson('/api/health');
+    if (!currentJob) setStatus('已连接 · 等待 Figma 发送');
+    return;
+  }
+
   const data = await getJson('/api/ps/pending');
   if (data && data.job) {
     await receiveJob(data.job, data.sourceUrl);
-  } else {
+  } else if (!currentJob) {
     setStatus('已连接 · 等待 Figma 发送');
   }
 }
@@ -459,7 +482,7 @@ el.auto.addEventListener('change', function () {
 el.save.addEventListener('click', saveAndSend);
 
 el.pull.addEventListener('click', async function () {
-  if (busy || currentJob) return;
+  if (busy || (currentJob && !currentJob.sent)) return;
   try {
     const data = await getJson('/api/ps/pending');
     if (!data || !data.job) {
@@ -476,9 +499,12 @@ el.pull.addEventListener('click', async function () {
 el.cancel.addEventListener('click', async function () {
   if (!currentJob || busy) return;
   const id = currentJob.id;
-  await failJob('已在 PS 面板取消');
+  const sent = currentJob.sent;
+  // 取消过的任务别再每 3 秒从文档标记里认回来
+  ignoredMarkers[id] = true;
+  if (!sent) await failJob('已在 PS 面板取消');
   currentJob = null;
-  log('已取消任务 #' + id);
+  log((sent ? '已停下任务 #' : '已取消任务 #') + id);
   setStatus('已取消');
   refresh();
 });

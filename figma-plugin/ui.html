@@ -212,7 +212,7 @@
     locateBtn.disabled = !(job && job.meta && job.meta.targetId);
     resumeBtn.disabled = !(job && !busy);
     cancelBtn.disabled = !(job || busy);
-    sendBtn.disabled = busy || !!job;
+    sendBtn.disabled = busy;
   }
 
   function renderJob(meta, text, spinning) {
@@ -225,12 +225,12 @@
     renderActions();
   }
 
-  /** 把当前任务写进 clientStorage（job 为空则清掉） */
+  /** 把当前任务写进 clientStorage（job 为空则清掉）；贴完也保留，方便以后再覆盖 */
   function rememberJob() {
     parent.postMessage({
       pluginMessage: {
         type: 'save-pending',
-        value: job ? { jobId: job.id, meta: job.meta, at: Date.now() } : null
+        value: job ? { jobId: job.id, meta: job.meta, at: Date.now(), appliedAt: job.appliedAt || 0 } : null
       }
     }, '*');
   }
@@ -374,16 +374,32 @@
     renderActions();
 
     log('任务 ' + created.id + ' 已发送，等待 PS 回传');
-    await waitForResult(created.id, finalMeta, token);
+    await watchJob(created.id, finalMeta, token, 'wait');
   }
 
-  /** 长轮询等 PS 回传；超时不丢任务，下次还能「继续等待」 */
-  async function waitForResult(jobId, meta, token) {
-    setBusy(true);
-    renderJob(null, '等待 PS 编辑', true);
+  /**
+   * 长轮询监听任务。
+   * mode='wait'：还没回写过，界面按「等 PS」置忙；
+   * 之后只要 PS 再传一次（updatedAt 比上次贴的更新），就自动覆盖同一图层。
+   * 超时不丢任务，点「继续等待」能接着守。
+   */
+  async function watchJob(jobId, meta, token, mode) {
+    var waiting = mode === 'wait';
+    if (waiting) {
+      setBusy(true);
+      renderJob(null, '等待 PS 编辑', true);
+    }
 
-    for (var i = 0; i < 240; i++) {
-      if (token !== runToken) return;
+    var lastFailed = 0;
+    var rounds = 0;
+    // 还没回写过时最多等 240 轮（每轮 ≤25 秒）；回写后长期守着，等 PS 再覆盖
+    while (token === runToken) {
+      if (waiting) {
+        if (++rounds > 240) break;
+      } else {
+        rounds = 0;
+      }
+
       var base = await ensureBase();
       if (!base) {
         await sleep(2000);
@@ -405,25 +421,48 @@
         continue;
       }
 
+      var appliedAt = (job && job.id === jobId && job.appliedAt) || 0;
       if (status.status === 'ready') {
-        await applyReady(base, jobId, meta);
-        return;
+        if (status.updatedAt > appliedAt) {
+          await applyReady(base, jobId, meta || (job && job.meta) || {}, status.updatedAt);
+          if (token !== runToken) return;
+          waiting = false;
+          await sleep(1000);
+        } else {
+          // 这份结果已经贴过（比如上次 ack 没发出去），补一次 ack 后慢点轮询
+          await fetch(base + '/api/jobs/' + jobId + '/ack', { method: 'POST' }).catch(function () {});
+          await sleep(2000);
+        }
+        continue;
+      }
+
+      if (status.status === 'done') {
+        // 已回写过：等 PS 再传。长轮询对「已结束」会立刻返回，这里自己降速
+        await sleep(2000);
+        continue;
       }
 
       if (status.status === 'failed') {
-        log(status.error || 'PS 端处理失败', true);
-        clearJob('PS 端失败');
-        return;
+        // 失败是「已结束」状态，长轮询会立刻返回；只提示一次，别把日志刷屏
+        if (status.updatedAt !== lastFailed) {
+          lastFailed = status.updatedAt;
+          log(status.error || 'PS 端处理失败', true);
+          waiting = false;
+          setBusy(false);
+          setState('PS 端失败 · 改完可重传');
+        }
+        await sleep(2000);
       }
     }
 
+    if (token !== runToken) return;
     setBusy(false);
-    setState('等待超时');
-    log('等待超时，任务 ' + jobId + ' 可能还在 PS 里；稍后可点「继续等待」', true);
+    setState('监听暂停');
+    log('已暂停监听任务 ' + jobId + '，点「继续等待」可恢复', true);
   }
 
-  /** 取回图片并写回原图层 */
-  async function applyReady(base, jobId, meta) {
+  /** 取回图片并写回原图层；贴完不解绑任务，PS 再传会覆盖同一图层 */
+  async function applyReady(base, jobId, meta, updatedAt) {
     setState('取回结果', true);
     try {
       var rr = await fetch(base + '/api/jobs/' + jobId + '/result', { cache: 'no-store' });
@@ -450,7 +489,14 @@
 
       await fetch(base + '/api/jobs/' + jobId + '/ack', { method: 'POST' }).catch(function () {});
       log('已取回 ' + (buf.byteLength / 1024).toFixed(0) + 'KB，写回原图层');
-      clearJob('已回写');
+
+      if (job && job.id === jobId) {
+        job.appliedAt = updatedAt || Date.now();
+        rememberJob();
+        renderJob(meta, '已回写 · 守着这个图层', false);
+      }
+      setBusy(false);
+      log('PS 里改完再回传，会自动覆盖同一图层（任务 ' + jobId + '）');
     } catch (err) {
       setBusy(false);
       setState('取回失败');
@@ -458,13 +504,13 @@
     }
   }
 
-  /** 插件重开后：拿上次记下的任务，接着等或直接贴回 */
+  /** 插件重开后：拿上次记下的任务；不论什么状态都继续守着，PS 再传就覆盖 */
   async function restore(value) {
     var jobId = value && value.jobId;
     if (!jobId) return;
 
     var meta = value.meta || {};
-    job = { id: jobId, meta: meta };
+    job = { id: jobId, meta: meta, appliedAt: value.appliedAt || 0 };
     renderJob(meta, '检查任务', true);
     renderActions();
 
@@ -493,23 +539,19 @@
 
     log('找到上次的任务 ' + jobId + '（' + status.status + '）');
 
-    if (status.status === 'ready') {
-      await applyReady(base, jobId, meta);
-      return;
-    }
-    if (status.status === 'failed') {
-      log(status.error || 'PS 端处理失败', true);
-      clearJob('PS 端失败');
-      return;
-    }
-    if (status.status === 'done') {
-      clearJob('已回写');
-      return;
+    if (status.status === 'ready' && status.updatedAt > job.appliedAt) {
+      await applyReady(base, jobId, meta, status.updatedAt);
+    } else if (status.status === 'done') {
+      log('任务 ' + jobId + ' 之前已经回写过；PS 里改完再传，会自动覆盖同一图层');
+      setState('已回写 · 守着这个图层');
+    } else if (status.status === 'failed') {
+      log((status.error || 'PS 端处理失败') + '；改完可在 PS 里重新回传');
+      setState('PS 端失败 · 改完可重传');
     }
 
-    // awaiting-image / pending / editing：接着等
-    log('任务还在 PS 那边，继续等待');
-    await waitForResult(jobId, meta, token);
+    // awaiting-image / pending / editing 显示成等待，其它状态静默守着
+    var live = status.status === 'awaiting-image' || status.status === 'pending' || status.status === 'editing';
+    await watchJob(jobId, meta, token, live ? 'wait' : 'idle');
   }
 
   function sleep(ms) {
@@ -524,7 +566,7 @@
       log('请先在画布上选中一张图片或画框', true);
       return;
     }
-    if (busy || job) return;
+    if (busy) return;
     taskMeta.textContent = '正在取源图…';
     setState('读取中', true);
     parent.postMessage({ pluginMessage: { type: 'send-request' } }, '*');
@@ -542,7 +584,7 @@
   resumeBtn.addEventListener('click', function () {
     if (!job || busy) return;
     var token = ++runToken;
-    waitForResult(job.id, job.meta, token).catch(function (err) {
+    watchJob(job.id, job.meta, token, job.appliedAt ? 'idle' : 'wait').catch(function (err) {
       log(err.message, true);
       setBusy(false);
     });
@@ -552,10 +594,20 @@
     runToken++;
     var id = job ? job.id : null;
     var wasBusy = busy;
+    setBusy(false);
+
+    // 已经回写过的任务：只停监听，记录留着（还能「认出原图层」、还能被 PS 覆盖）
+    if (job && job.appliedAt) {
+      setState('已停止监听 · 改完可重传');
+      log('已停止监听任务 ' + id + '；记录还在，点「继续等待」可恢复监听');
+      renderActions();
+      return;
+    }
+
     job = null;
     rememberJob();
-    setBusy(false);
-    setState('已停止');
+    setState('已取消');
+    renderActions();
     if (id && wasBusy) {
       // 让服务端把任务标记为失败，否则 PS 端会一直被这个任务「占着」
       fetch((activeBase || server()) + '/api/jobs/' + id + '/fail', {
@@ -578,9 +630,10 @@
 
     if (msg.type === 'selection') {
       selection = msg;
-      if (!busy && !job) {
+      // 任务记录会长期保留，选中新对象时只更新目标名，不打断任务状态
+      if (!busy && (!job || msg.count)) {
         taskName.textContent = msg.count ? msg.name : '未选择';
-        if (!msg.count) {
+        if (!msg.count && !job) {
           taskMeta.textContent = '请选中一个带图片的图层或画框';
           setState('待发送');
         }
@@ -607,6 +660,19 @@
           setState('出错');
           setBusy(false);
         });
+      }
+      return;
+    }
+
+    if (msg.type === 'fallback-created') {
+      // 以后这张新图层就是原图层，再回传直接覆盖它
+      if (job && job.meta) {
+        job.meta.targetId = msg.targetId;
+        job.meta.targetName = msg.name;
+        job.meta.paintIndex = 0;
+        job.meta.fallback = false;
+        rememberJob();
+        log('记下新图层「' + msg.name + '」，下次回传会覆盖它');
       }
       return;
     }
