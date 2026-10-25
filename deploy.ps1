@@ -22,15 +22,50 @@ function Title($text) {
     Write-Host ('  ' + ('-' * 52)) -ForegroundColor DarkGray
 }
 
+function Get-PythonInvocation {
+    # 本机可能只有 py 启动器、python 不在 PATH：按 python → py -3 → py 依次探测
+    $candidates = @(
+        @{ Exe = 'python'; Args = @() },
+        @{ Exe = 'py';     Args = @('-3') },
+        @{ Exe = 'py';     Args = @() }
+    )
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        foreach ($candidate in $candidates) {
+            if (-not (Get-Command $candidate.Exe -ErrorAction SilentlyContinue)) { continue }
+            $argv = @($candidate.Args) + '--version'
+            $output = ''
+            try {
+                $output = (& $candidate.Exe @argv 2>&1 | ForEach-Object { "$_" }) -join ' '
+            } catch {
+                continue
+            }
+            if ($LASTEXITCODE -ne 0) { continue }
+            $m = [regex]::Match($output, 'Python\s+(\d+)\.')
+            if (-not $m.Success) { continue }
+            $major = [int]$m.Groups[1].Value
+            if ($major -lt 3) { continue }
+            return [pscustomobject]@{
+                Command = ((@($candidate.Exe) + @($candidate.Args)) -join ' ')
+                Version = ($output -replace '\s+', ' ').Trim()
+                Major   = $major
+            }
+        }
+    } finally {
+        $ErrorActionPreference = $saved
+    }
+    return $null
+}
+
 function Test-Python {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($cmd) {
-        $ver = (& python --version 2>&1) -join ''
-        Ok "Python 可用（$ver）"
+    $py = Get-PythonInvocation
+    if ($py) {
+        Ok "Python 可用（$($py.Version)，命令：$($py.Command)）"
         return $true
     }
-    Err ' 没有找到 python 命令，桥接服务无法启动'
-    Warn ' 请到 https://www.python.org/downloads/ 安装，安装时勾选 "Add Python to PATH"'
+    Err ' 没有找到可用的 Python（python / py 均不可用），桥接服务无法启动'
+    Warn ' 请到 https://www.python.org/downloads/ 安装 Python 3，安装时勾选 "Add Python to PATH"'
     return $false
 }
 

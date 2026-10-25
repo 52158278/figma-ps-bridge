@@ -71,20 +71,31 @@
     color: var(--onbrand);
     font-size: 12px;
   }
+  .actions { display: flex; gap: 5px; margin-top: 6px; }
+  .actions button { flex: 1; padding: 5px 4px; white-space: nowrap; }
+  .list-title { margin: 8px 0 3px; font-size: 10px; color: var(--muted); display: flex; align-items: center; justify-content: space-between; }
+  #filterBtn { font-size: 10px; padding: 0 4px; }
+  #filterBtn.on { color: var(--brand); }
+  .list { flex: 1 1 auto; min-height: 70px; overflow-y: auto; }
+  .empty { color: var(--muted); font-size: 10px; padding: 8px 2px; }
   .card {
-    margin-top: 7px;
+    margin-bottom: 6px;
     padding: 6px 9px;
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--bg-2);
   }
-  .card .row { display: flex; justify-content: space-between; gap: 8px; }
+  .card .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
   .card .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card .meta {
     color: var(--muted); font-size: 10px; margin-top: 2px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  .card .row-actions { display: flex; gap: 4px; margin-top: 5px; }
+  .card .row-actions button { padding: 3px 7px; font-size: 10px; }
   .state { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+  .state.done { color: var(--ok); }
+  .state.bad { color: var(--danger); }
   .spinner {
     width: 8px; height: 8px; border-radius: 50%;
     border: 1.5px solid var(--border); border-top-color: var(--brand);
@@ -93,8 +104,9 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   .log-title { margin: 7px 0 3px; font-size: 10px; color: var(--muted); }
   .log {
-    flex: 1;
-    min-height: 42px;
+    flex: 1 1 auto;
+    min-height: 60px;
+    max-height: 40%;
     overflow-y: auto;
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -107,60 +119,126 @@
   }
   .log b { color: var(--text); font-weight: 500; }
   .log .err { color: var(--danger); }
-  .actions { display: flex; gap: 5px; margin-top: 6px; }
-  .actions button { flex: 1; padding: 5px 4px; white-space: nowrap; }
+
+  /* ---- 折叠与紧凑布局（0.3.0） ---- */
+  h1 { justify-content: flex-start; }
+  h1 .grow { flex: 1 1 auto; }
+  .icon-btn {
+    border: 0; background: transparent; padding: 0 3px; cursor: pointer;
+    color: var(--muted); font-size: 12px; line-height: 1; border-radius: 4px;
+  }
+  .icon-btn:hover { color: var(--text); background: var(--bg-2); }
+  .topmore.collapsed { display: none; }
+  .log.collapsed { display: none; }
+  .psline {
+    display: flex; align-items: center; gap: 4px;
+    margin: 5px 0 0; font-size: 10px; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .psline .live { color: var(--brand); font-weight: 600; }
+  .log-title { display: flex; align-items: center; justify-content: space-between; cursor: pointer; user-select: none; }
+  .log-title .chev { font-size: 9px; color: var(--muted); }
+  .err-badge { color: var(--danger); margin-left: 4px; display: none; }
+  .err-badge.on { display: inline; }
+  .thumb {
+    width: 34px; height: 34px; border-radius: 4px; flex: 0 0 auto;
+    border: 1px solid var(--border); background: var(--bg);
+    object-fit: cover; display: block;
+  }
+  .thumb.empty {
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 13px;
+  }
+  .card .row { align-items: flex-start; }
+  .card .body { flex: 1 1 auto; min-width: 0; }
+  .psbadge {
+    display: inline-block; font-size: 9px; line-height: 1.5; padding: 0 4px;
+    border-radius: 3px; margin-left: 4px; vertical-align: 1px;
+    background: var(--brand); color: var(--onbrand);
+  }
+  .psbadge.soft { background: transparent; color: var(--muted); border: 1px solid var(--border); }
 </style>
 </head>
 <body>
-  <h1>PS 桥接 <span class="dot" id="bridgeDot"></span><span class="dot" id="psDot"></span></h1>
-  <p class="sub">选中图片 → 发送到 PS → 点「保存回传」</p>
+  <h1>
+    PS 桥接
+    <span class="dot" id="bridgeDot"></span><span class="dot" id="psDot"></span>
+    <span class="grow"></span>
+    <button class="icon-btn" id="settingsToggle" title="显示/隐藏说明与桥接地址">⚙</button>
+  </h1>
 
-  <label for="server">桥接服务地址</label>
-  <input id="server" spellcheck="false" value="http://localhost:8765">
+  <div class="topmore collapsed" id="topMore">
+    <p class="sub" id="hint">选中图片 → 发送到 PS → PS 里改完点「保存回传」</p>
+    <label for="server">桥接服务地址</label>
+    <input id="server" spellcheck="false" value="http://localhost:8765">
+  </div>
+
+  <div class="psline" id="psline">PS 状态未知</div>
 
   <button class="primary" id="send">发送选中到 PS</button>
 
-  <div class="card" id="card">
-    <div class="row">
-      <span class="name" id="taskName">未选择</span>
-      <span class="state" id="taskState">待发送</span>
-    </div>
-    <div class="meta" id="taskMeta">—</div>
+  <div class="actions">
+    <button id="resume" title="把已停止/过期的任务重新加入监听">继续等待</button>
+    <button id="clear" title="从列表里移除已停止、失败、过期的任务">清空已完成</button>
   </div>
 
-  <div class="actions" id="actions">
-    <button id="locate" title="按记录的位置选中并定位到原图层">认出原图层</button>
-    <button id="resume" title="继续等待 PS 回传结果">继续等待</button>
-    <button id="cancel" title="停止等待这个任务">停止等待</button>
+  <div class="list-title">
+    <span>任务 <span id="count">0</span></span>
+    <button class="icon-btn" id="filterBtn" title="只显示 PS 里打开的任务">只看 PS 中</button>
   </div>
+  <div class="list" id="list"></div>
 
-  <div class="log-title">运行日志</div>
-  <div class="log" id="log"></div>
+  <div class="log-title" id="logTitle">
+    <span>运行日志<span class="err-badge" id="logBadge">●</span></span>
+    <span class="chev" id="logChev">▸</span>
+  </div>
+  <div class="log collapsed" id="log"></div>
 
 <script>
 (function () {
   var serverInput = document.getElementById('server');
   var sendBtn = document.getElementById('send');
-  var locateBtn = document.getElementById('locate');
   var resumeBtn = document.getElementById('resume');
-  var cancelBtn = document.getElementById('cancel');
+  var clearBtn = document.getElementById('clear');
+  var listEl = document.getElementById('list');
+  var countEl = document.getElementById('count');
+  var hintEl = document.getElementById('hint');
   var logEl = document.getElementById('log');
-  var taskName = document.getElementById('taskName');
-  var taskMeta = document.getElementById('taskMeta');
-  var taskState = document.getElementById('taskState');
   var bridgeDot = document.getElementById('bridgeDot');
   var psDot = document.getElementById('psDot');
+  var settingsToggle = document.getElementById('settingsToggle');
+  var topMore = document.getElementById('topMore');
+  var pslineEl = document.getElementById('psline');
+  var logTitleEl = document.getElementById('logTitle');
+  var logChev = document.getElementById('logChev');
+  var logBadge = document.getElementById('logBadge');
+  var filterBtn = document.getElementById('filterBtn');
 
   var selection = { count: 0, name: '' };
-  var runToken = 0;
-  var busy = false;
-  // 当前任务 { id, meta }；同时写进 clientStorage，插件重开后还能接着续上
-  var job = null;
-  var activeBase = null;      // 探测到的可用桥接服务地址
-  var awaitingPending = false; // 正在等主线程回传 clientStorage 里的任务
-
   // 与 bridge/server.py、ps-cep/js/main.js 保持一致
   var PORTS = [8765, 8766, 8767, 8768, 8769, 8770, 8771, 8772, 8773, 8774];
+  var JOB_STATES = ['watching', 'done', 'stopped', 'failed', 'expired'];
+  // 一次 watch 最多盯多少个任务（防止 ids 无限增长撑爆 URL）
+  var MAX_WATCH_JOBS = 40;
+  var RETRY_DELAYS = [2000, 4000, 8000, 15000, 30000];
+  var MAX_APPLY_FAILURES = 3;      // 写回连续失败次数上限：同一条不可修复的错误不再无限退避（D4）
+  var REGISTRY_TIMEOUT_MS = 4000;  // 等主线程 jobs 的超时：主线程异常时别把发送按钮永久卡死（D6）
+
+  // 注册表：{version:2, fileKey, jobs:[{jobId, meta, at, appliedAt, state}]}
+  var registry = { version: 2, fileKey: null, jobs: [] };
+  var registryLoaded = false;
+  var resolveRegistryReady = null;
+  var registryReady = new Promise(function (resolve) { resolveRegistryReady = resolve; });
+
+  var activeBase = null;      // 探测到的可用桥接服务地址
+  var sending = false;        // 正在把选中图层发出去
+  var uiStatus = {};          // jobId -> 临时状态文案（取回结果、重试中等）
+  var retryState = {};        // jobId -> {count, timer, updatedAt}
+  var applyFailures = {};     // jobId -> 写回连续失败次数（到上限就放弃）
+  var applying = {};          // jobId -> 正在回写
+  var pendingApply = {};      // jobId -> {resolve}：等主线程 apply-done
+  var lastFailure = {};       // jobId -> 已提示过的 failed updatedAt
+  var coordinatorStarted = false;
 
   // 插件 iframe 里 localStorage 可能抛 SecurityError，降级到内存
   var memoryStore = {};
@@ -179,6 +257,174 @@
     store.set('ps-bridge-server', server());
   });
 
+  // ---------------- 面板折叠（顶部信息 / 运行日志） ----------------
+  // 目标：把屏幕尽量留给任务列表。默认都收起，用户开合状态持久化。
+
+  var topOpen = store.get('ps-bridge-top-open') === '1';
+  var logOpen = store.get('ps-bridge-log-open') === '1';
+
+  function applyTopOpen() {
+    topMore.className = 'topmore' + (topOpen ? '' : ' collapsed');
+    settingsToggle.textContent = topOpen ? '×' : '⚙';
+    settingsToggle.title = topOpen ? '收起说明与地址' : '显示说明与桥接地址';
+  }
+
+  function applyLogOpen() {
+    logEl.className = 'log' + (logOpen ? '' : ' collapsed');
+    logChev.textContent = logOpen ? '▾' : '▸';
+    if (logOpen) logBadge.className = 'err-badge';
+  }
+
+  settingsToggle.addEventListener('click', function () {
+    topOpen = !topOpen;
+    store.set('ps-bridge-top-open', topOpen ? '1' : '0');
+    applyTopOpen();
+  });
+
+  logTitleEl.addEventListener('click', function () {
+    logOpen = !logOpen;
+    store.set('ps-bridge-log-open', logOpen ? '1' : '0');
+    applyLogOpen();
+  });
+
+  applyTopOpen();
+  applyLogOpen();
+
+  // ---------------- PS 现场状态（只读） ----------------
+  // 桥接服务把 PS 面板上报的 {activeJobId, openJobIds} 透传过来，
+  // 让 Figma 侧知道“PS 里开着哪几张、现在正在看哪一张”。
+
+  var psState = { online: false, activeJobId: null, openJobIds: [], updatedAt: 0, supported: false };
+
+  // 列表过滤：默认只显示「PS 里开着的」任务，避免记录越攒越多把列表占满。
+  // 还没贴回过的新任务会保留显示（PS 打开它可能有 2 秒延迟）。
+  var onlyOpen = store.get('ps-bridge-only-open') !== '0';
+  var filterActive = false;
+
+  function filterUsable() {
+    return onlyOpen && psState.online && psState.supported;
+  }
+
+  // 刚发出去、PS 还没接手时的缓冲时间：超过就按「PS 里开着」判断
+  var SEND_GRACE_MS = 60000;
+
+  function visibleJobs() {
+    var all = registry.jobs;
+    if (!filterActive) return all;
+    var open = psState.openJobIds;
+    var now = Date.now();
+    var out = [];
+    for (var i = 0; i < all.length; i++) {
+      var entry = all[i];
+      if (open.indexOf(entry.jobId) >= 0) { out.push(entry); continue; }
+      // 刚发出去、PS 还没打开：给 60 秒缓冲，避免点完发送任务就“消失”。
+      // 一旦 PS 打开过（seenOpen）又关掉，就不再占着列表（v0.3.3）。
+      if (!entry.appliedAt && !entry.seenOpen && (now - (entry.at || 0)) < SEND_GRACE_MS) {
+        out.push(entry);
+      }
+    }
+    return out;
+  }
+
+  function renderFilterBtn() {
+    if (nonFilterable()) {
+      filterBtn.textContent = '显示全部';
+      filterBtn.className = 'icon-btn';
+      filterBtn.disabled = true;
+      filterBtn.title = 'PS 面板未连接（或版本过旧），无法按「PS 里打开」过滤';
+      return;
+    }
+    filterBtn.disabled = false;
+    filterBtn.textContent = onlyOpen ? '只看 PS 中' : '显示全部';
+    filterBtn.className = 'icon-btn' + (onlyOpen ? ' on' : '');
+    filterBtn.title = onlyOpen
+      ? '当前只显示 PS 里打开的任务；点一下显示全部记录'
+      : '当前显示全部记录；点一下只显示 PS 里打开的任务';
+  }
+
+  function nonFilterable() {
+    return !psState.online || !psState.supported;
+  }
+
+  filterBtn.addEventListener('click', function () {
+    onlyOpen = !onlyOpen;
+    store.set('ps-bridge-only-open', onlyOpen ? '1' : '0');
+    filterActive = filterUsable();
+    renderList();
+  });
+
+  function applyPsState(ps) {
+    if (!ps || typeof ps !== 'object') return;
+    var open = Array.isArray(ps.openJobIds) ? ps.openJobIds.slice() : [];
+    var active = ps.activeJobId || null;
+    var changed = !!ps.online !== psState.online ||
+      active !== psState.activeJobId ||
+      open.join(',') !== psState.openJobIds.join(',');
+
+    var supported = psState.supported || open.length > 0 || (Number(ps.updatedAt) || 0) > 0;
+
+    psState = {
+      online: !!ps.online,
+      activeJobId: active,
+      openJobIds: open,
+      updatedAt: Number(ps.updatedAt) || 0,
+      supported: supported
+    };
+
+    psDot.className = 'dot ' + (psState.online ? 'on' : 'bad');
+    psDot.title = psState.online ? 'PS 面板在线' : 'PS 面板未连接';
+
+    // 记住「PS 确实打开过它」：之后它被关掉就不该再靠缓冲期占着列表
+    for (var k = 0; k < open.length; k++) {
+      var openedEntry = findJob(open[k]);
+      if (openedEntry) openedEntry.seenOpen = true;
+    }
+
+    renderPsLine();
+    var nextFilterActive = filterUsable();
+    var filterChanged = nextFilterActive !== filterActive;
+    filterActive = nextFilterActive;
+    renderFilterBtn();
+    if (changed || filterChanged) renderList();
+  }
+
+  function renderPsLine() {
+    if (!psState.online) {
+      pslineEl.textContent = 'PS 面板未连接';
+      pslineEl.title = 'PS 里没打开「Figma 桥接」面板，Figma 无法知道 PS 那边的情况';
+      return;
+    }
+    var entry = psState.activeJobId ? findJob(psState.activeJobId) : null;
+    var text;
+    var live = false;
+    if (entry) {
+      text = 'PS 正在看：' + nameOf(entry.meta);
+      live = true;
+    } else if (psState.openJobIds.length) {
+      text = 'PS 里开着 ' + psState.openJobIds.length + ' 张（当前文档没有任务标记）';
+    } else {
+      text = 'PS 空闲';
+    }
+    pslineEl.textContent = '';
+    if (live) {
+      var dot = document.createElement('span');
+      dot.className = 'live';
+      dot.textContent = '◆';
+      pslineEl.appendChild(dot);
+      pslineEl.appendChild(document.createTextNode(' ' + text));
+    } else {
+      pslineEl.appendChild(document.createTextNode(text));
+    }
+    pslineEl.title = text;
+  }
+
+  // 面板有焦点时刷得快，切到后台降频（用户选的“自适应”节奏）
+  function idleDelay() {
+    var focused = true;
+    try { focused = document.hasFocus ? document.hasFocus() : true; } catch (e) { focused = true; }
+    return focused ? 3000 : 15000;
+  }
+
   function server() {
     return (serverInput.value || 'http://localhost:8765').trim().replace(/\/+$/, '');
   }
@@ -190,56 +436,20 @@
     line.innerHTML = '<b>' + time + '</b>  ' + escapeHtml(text);
     logEl.appendChild(line);
     logEl.scrollTop = logEl.scrollHeight;
+    // 日志收起时用小红点提示「有新错误」，避免把错误藏起来
+    if (isError && !logOpen) logBadge.className = 'err-badge on';
   }
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; });
   }
 
-  function setState(text, spinning) {
-    taskState.innerHTML = spinning
-      ? '<span class="spinner"></span>' + escapeHtml(text)
-      : escapeHtml(text);
+  function sleep(ms) {
+    return new Promise(function (r) { setTimeout(r, ms); });
   }
 
-  function setBusy(value) {
-    busy = value;
-    renderActions();
-  }
-
-  /** 按当前状态决定按钮能不能点（按钮常驻，方便随时看见） */
-  function renderActions() {
-    locateBtn.disabled = !(job && job.meta && job.meta.targetId);
-    resumeBtn.disabled = !(job && !busy);
-    cancelBtn.disabled = !(job || busy);
-    sendBtn.disabled = busy;
-  }
-
-  function renderJob(meta, text, spinning) {
-    if (meta) {
-      taskName.textContent = meta.nodeName || meta.targetName || '未命名';
-      taskMeta.textContent = (meta.imageWidth || '?') + '×' + (meta.imageHeight || '?') + ' px · 画布 ' +
-        (meta.nodeWidth || '?') + '×' + (meta.nodeHeight || '?');
-    }
-    setState(text, spinning);
-    renderActions();
-  }
-
-  /** 把当前任务写进 clientStorage（job 为空则清掉）；贴完也保留，方便以后再覆盖 */
-  function rememberJob() {
-    parent.postMessage({
-      pluginMessage: {
-        type: 'save-pending',
-        value: job ? { jobId: job.id, meta: job.meta, at: Date.now(), appliedAt: job.appliedAt || 0 } : null
-      }
-    }, '*');
-  }
-
-  function clearJob(text) {
-    job = null;
-    rememberJob();
-    setBusy(false);
-    setState(text || '待发送');
+  function nameOf(meta) {
+    return (meta && (meta.nodeName || meta.targetName)) || '未命名';
   }
 
   function b64ToBytes(b64) {
@@ -257,6 +467,280 @@
     }
     return btoa(parts.join(''));
   }
+
+  /** 把源图 base64 缩成 68px 以内的 PNG data URL；失败返回空串（绝不影响发送） */
+  function makeThumb(b64) {
+    return new Promise(function (resolve) {
+      var done = false;
+      function finish(value) {
+        if (done) return;
+        done = true;
+        resolve(value || '');
+      }
+      try {
+        var img = new Image();
+        img.onload = function () {
+          try {
+            var max = 68; // 34px 显示 @2x
+            var scale = Math.min(max / (img.width || 1), max / (img.height || 1), 1);
+            var w = Math.max(1, Math.round((img.width || 1) * scale));
+            var h = Math.max(1, Math.round((img.height || 1) * scale));
+            var canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+            finish(canvas.toDataURL('image/png'));
+          } catch (e) {
+            finish('');
+          }
+        };
+        img.onerror = function () { finish(''); };
+        img.src = 'data:image/png;base64,' + b64;
+      } catch (e) {
+        finish('');
+        return;
+      }
+      setTimeout(function () { finish(''); }, 3000); // 解码卡住时的兜底
+    });
+  }
+
+  // ---------------- 注册表 ----------------
+
+  function normalizeValue(value) {
+    var jobs = [];
+    var seen = {};
+    var list = value && Array.isArray(value.jobs) ? value.jobs : [];
+    for (var i = 0; i < list.length; i++) {
+      var raw = list[i];
+      if (!raw || !raw.jobId || seen[raw.jobId]) continue;
+      seen[raw.jobId] = true;
+      jobs.push({
+        jobId: String(raw.jobId),
+        meta: raw.meta && typeof raw.meta === 'object' ? raw.meta : {},
+        at: Number(raw.at) || 0,
+        appliedAt: Number(raw.appliedAt) || 0,
+        state: JOB_STATES.indexOf(raw.state) >= 0 ? raw.state : 'watching',
+        thumb: typeof raw.thumb === 'string' ? raw.thumb : ''
+      });
+    }
+    return {
+      version: 2,
+      fileKey: value && typeof value.fileKey === 'string' ? value.fileKey : null,
+      jobs: jobs
+    };
+  }
+
+  function saveRegistry() {
+    parent.postMessage({ pluginMessage: { type: 'save-jobs', value: registry } }, '*');
+  }
+
+  function findJob(jobId) {
+    for (var i = 0; i < registry.jobs.length; i++) {
+      if (registry.jobs[i].jobId === jobId) return registry.jobs[i];
+    }
+    return null;
+  }
+
+  function findActiveByTargetId(targetId) {
+    if (!targetId) return null;
+    for (var i = 0; i < registry.jobs.length; i++) {
+      var entry = registry.jobs[i];
+      if (entry.state === 'watching' && entry.meta && entry.meta.targetId === targetId) return entry;
+    }
+    return null;
+  }
+
+  // ---------------- 渲染 ----------------
+
+  function statusText(entry) {
+    if (uiStatus[entry.jobId]) return uiStatus[entry.jobId];
+    if (entry.state === 'done') return '已回写 · 仍在监听';
+    if (entry.state === 'stopped') {
+      return entry.appliedAt ? '已停止监听 · 可再传' : '已取消 · 可继续等待恢复';
+    }
+    if (entry.state === 'failed') return '失败 · 有新结果会自动再试';
+    if (entry.state === 'expired') return '任务过期 · 仍可认出原图层';
+    return entry.appliedAt ? '已回写 · 守着这个图层' : '等待 PS 编辑';
+  }
+
+  // 仍在监听 = 桥接上之后可能还会有新结果。
+  // 只有两种明确「不要再管」的状态除外：
+  //   stopped —— 用户在 Figma 里主动点了「停止」
+  //   expired —— 桥接上记录已经不存在
+  // 特别注意 failed 必须继续监听：PS 面板「取消任务」会把任务置 failed，
+  // 用户之后重开 PSD 再点「保存并回传」，必须能自动贴回，
+  // 否则就会出现「PS 允许你传、Figma 却拒收」的自相矛盾（v0.2.2 修复）。
+  function isListening(entry) {
+    return !!entry && entry.state !== 'stopped' && entry.state !== 'expired';
+  }
+
+  function stateClass(entry) {
+    if (entry.state === 'done') return 'state done';
+    if (entry.state === 'failed' || entry.state === 'expired') return 'state bad';
+    return 'state';
+  }
+
+  function psBadgeFor(jobId) {
+    if (!psState.online) return null;
+    if (psState.activeJobId === jobId) return { text: '◆ PS 正在看', cls: 'psbadge' };
+    if (psState.openJobIds.indexOf(jobId) >= 0) return { text: 'PS 已打开', cls: 'psbadge soft' };
+    return null;
+  }
+
+  function renderRow(entry) {
+    var card = document.createElement('div');
+    card.className = 'card';
+    card.setAttribute('data-job', entry.jobId);
+
+    var row = document.createElement('div');
+    row.className = 'row';
+
+    // 缩略图：发送时生成并存进注册表，面板重开/插件重跑后仍在
+    if (entry.thumb && entry.thumb !== 'none') {
+      var img = document.createElement('img');
+      img.className = 'thumb';
+      img.src = entry.thumb;
+      img.alt = '';
+      row.appendChild(img);
+    } else {
+      var ph = document.createElement('div');
+      ph.className = 'thumb empty';
+      ph.textContent = '▢';
+      ph.title = entry.thumb === 'none'
+        ? '原图层已不在，无法生成缩略图'
+        : '正在生成缩略图…';
+      row.appendChild(ph);
+    }
+
+    var body = document.createElement('div');
+    body.className = 'body';
+
+    var name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = nameOf(entry.meta);
+    name.title = name.textContent;
+
+    var badge = psBadgeFor(entry.jobId);
+    if (badge) {
+      var badgeEl = document.createElement('span');
+      badgeEl.className = badge.cls;
+      badgeEl.textContent = badge.text;
+      name.appendChild(badgeEl);
+    }
+
+    var meta = entry.meta || {};
+    var metaLine = document.createElement('div');
+    metaLine.className = 'meta';
+    metaLine.textContent = (meta.imageWidth || '?') + '×' + (meta.imageHeight || '?') + ' px · 画布 ' +
+      (meta.nodeWidth || '?') + '×' + (meta.nodeHeight || '?') + ' · ' + entry.jobId;
+    metaLine.title = metaLine.textContent;
+
+    body.appendChild(name);
+    body.appendChild(metaLine);
+
+    var state = document.createElement('span');
+    state.className = stateClass(entry);
+    if (entry.state === 'watching' && (!entry.appliedAt || uiStatus[entry.jobId])) {
+      // 还在等 PS 或正在取回/重试：转个圈
+      var spinner = document.createElement('span');
+      spinner.className = 'spinner';
+      state.appendChild(spinner);
+    }
+    state.appendChild(document.createTextNode(statusText(entry)));
+
+    row.appendChild(body);
+    row.appendChild(state);
+
+    var actions = document.createElement('div');
+    actions.className = 'row-actions';
+
+    var locate = document.createElement('button');
+    locate.textContent = '认出原图层';
+    locate.disabled = !(meta.targetId);
+    locate.addEventListener('click', function () { locateEntry(entry.jobId); });
+
+    var stop = document.createElement('button');
+    stop.textContent = '停止';
+    stop.disabled = !isListening(entry);
+    stop.addEventListener('click', function () { stopEntry(entry.jobId); });
+
+    actions.appendChild(locate);
+    actions.appendChild(stop);
+
+    card.appendChild(row);
+    card.appendChild(actions);
+    return card;
+  }
+
+  function renderList() {
+    var scrollTop = listEl.scrollTop;
+    listEl.textContent = '';
+
+    var shown = visibleJobs();
+    var total = registry.jobs.length;
+    countEl.textContent = filterActive ? (shown.length + ' / ' + total) : String(total);
+    renderFilterBtn();
+
+    if (!shown.length) {
+      var empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = (filterActive && total)
+        ? 'PS 里没有打开的任务。点上面的「显示全部」可以看到 ' + total + ' 条历史记录。'
+        : '还没有任务。选中图层后点上面的按钮发送。';
+      listEl.appendChild(empty);
+      listEl.scrollTop = scrollTop;
+      return;
+    }
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < shown.length; i++) {
+      frag.appendChild(renderRow(shown[i]));
+    }
+    listEl.appendChild(frag);
+    listEl.scrollTop = scrollTop;
+    requestMissingThumbs();
+  }
+
+  // 老任务没有缩略图时，请主线程按目标节点重新渲染一张小的补上（一次最多 3 个，免得一次导出太多）
+  var thumbRequested = {};
+
+  function requestMissingThumbs() {
+    var budget = 3;
+    for (var i = 0; i < registry.jobs.length && budget > 0; i++) {
+      var entry = registry.jobs[i];
+      if (entry.thumb) continue; // 已有图，或已确认拿不到（'none'）
+      if (thumbRequested[entry.jobId]) continue;
+      thumbRequested[entry.jobId] = true;
+      budget--;
+      parent.postMessage({
+        pluginMessage: {
+          type: 'thumb-request',
+          jobId: entry.jobId,
+          targetId: (entry.meta || {}).targetId || ''
+        }
+      }, '*');
+    }
+  }
+
+  function setStatus(jobId, text) {
+    if (!findJob(jobId)) return;
+    uiStatus[jobId] = text;
+    renderList();
+  }
+
+  function clearStatus(jobId) {
+    if (!(jobId in uiStatus)) return;
+    delete uiStatus[jobId];
+    renderList();
+  }
+
+  function renderSendButton() {
+    sendBtn.disabled = sending;
+    sendBtn.textContent = sending
+      ? '发送中…'
+      : (selection.count ? '发送 ' + selection.count + ' 个到 PS' : '发送选中到 PS');
+  }
+
+  // ---------------- 端口探测 / 健康检查 ----------------
 
   /** 依次探测候选端口，找到可用的桥接服务就返回 { base, data } */
   async function findServer() {
@@ -300,8 +784,8 @@
     var found = await findServer();
     if (!found) {
       bridgeDot.className = 'dot bad';
-      psDot.className = 'dot bad';
       activeBase = null;
+      applyPsState({ online: false, activeJobId: null, openJobIds: [], updatedAt: 0 });
       return;
     }
 
@@ -313,165 +797,276 @@
     activeBase = found.base;
 
     bridgeDot.className = 'dot on';
-    psDot.className = 'dot ' + (found.data.psOnline ? 'on' : 'bad');
-    psDot.title = found.data.psOnline ? 'PS 面板在线' : 'PS 面板未连接';
+    applyPsState(found.data.ps || {
+      online: !!found.data.psOnline,
+      activeJobId: null,
+      openJobIds: [],
+      updatedAt: 0
+    });
   }
 
-  async function upload(meta, dataB64) {
-    var token = ++runToken;
-    renderJob(meta, '发送中', true);
-    setBusy(true);
+  // ---------------- 发送（支持多选） ----------------
 
-    var blob = new Blob([b64ToBytes(dataB64)], { type: 'image/png' });
+  async function uploadOne(base, item) {
+    var meta = (item && item.meta) || {};
+    var data = item && item.data;
+    var displayName = nameOf(meta);
+    if (!data) throw new Error('源图数据为空');
+    if (findActiveByTargetId(meta.targetId)) {
+      log('「' + displayName + '」已在处理中，已跳过', true);
+      return;
+    }
+
     var finalMeta = Object.assign({}, meta, { client: 'figma' });
-    log('取到源图 ' + meta.imageWidth + '×' + meta.imageHeight + '（' + meta.mode + '）');
+    var res = await fetch(base + '/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(finalMeta)
+    });
+    if (!res.ok) throw new Error('创建任务失败 ' + res.status);
+    var created = await res.json();
 
-    var base = await ensureBase();
-    if (!base) {
-      setBusy(false);
-      setState('连接失败');
-      log('找不到桥接服务。请确认已双击运行「启动桥接.bat」', true);
-      return;
-    }
-
-    var created;
-    try {
-      var res = await fetch(base + '/api/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(finalMeta)
-      });
-      if (!res.ok) throw new Error('创建任务失败 ' + res.status);
-      created = await res.json();
-    } catch (err) {
-      setState('发送失败');
-      log('连接桥接服务失败：' + err.message + '。请确认已双击运行「启动桥接.bat」', true);
-      setBusy(false);
-      return;
-    }
-
-    try {
-      var put = await fetch(base + '/api/jobs/' + created.id + '/image', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'image/png' },
-        body: blob
-      });
-      if (!put.ok) throw new Error('上传失败 ' + put.status);
-    } catch (err) {
-      setState('上传失败');
-      log('上传图片失败：' + err.message, true);
+    var blob = new Blob([b64ToBytes(data)], { type: 'image/png' });
+    var put = await fetch(base + '/api/jobs/' + created.id + '/image', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'image/png' },
+      body: blob
+    });
+    if (!put.ok) {
       fetch(base + '/api/jobs/' + created.id + '/fail', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ error: 'Figma 端上传失败' })
       }).catch(function () {});
-      setBusy(false);
+      throw new Error('上传失败 ' + put.status);
+    }
+
+    var thumb = await makeThumb(data);
+
+    registry.jobs.push({
+      jobId: created.id,
+      meta: finalMeta,
+      at: Date.now(),
+      appliedAt: 0,
+      state: 'watching',
+      thumb: thumb
+    });
+    saveRegistry();
+    renderList();
+    log('任务 ' + created.id + ' 已发送（' + displayName + '）');
+  }
+
+  async function handleSendPayloads(items) {
+    try {
+      if (!items.length) {
+        log('没有需要发送的图层', true);
+        return;
+      }
+      var ready = await waitRegistry();
+      if (!ready) {
+        // 主线程一直没回 jobs：解除 busy，别让按钮永久 disabled（D6）
+        log('读取任务列表超时，请重开面板', true);
+        return;
+      }
+      var base = await ensureBase();
+      if (!base) {
+        log('找不到桥接服务。请确认已双击运行「启动桥接.bat」', true);
+        return;
+      }
+      var done = 0;
+      var failed = 0;
+      for (var i = 0; i < items.length; i++) {
+        try {
+          await uploadOne(base, items[i]);
+          done++;
+        } catch (err) {
+          failed++;
+          log('「' + nameOf(items[i] && items[i].meta) + '」发送失败：' + err.message, true);
+        }
+      }
+      log('已发送 ' + done + ' 个任务' + (failed ? '，失败 ' + failed + ' 个' : '') + '，等待 PS 回传');
+    } finally {
+      sending = false;
+      renderSendButton();
+      startCoordinator();
+    }
+  }
+
+  /** 等注册表：最多 REGISTRY_TIMEOUT_MS 毫秒，超时返回 false（主线程异常时不阻塞发送流程） */
+  function waitRegistry() {
+    return new Promise(function (resolve) {
+      var settled = false;
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        resolve(false);
+      }, REGISTRY_TIMEOUT_MS);
+      registryReady.then(function () {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+  }
+
+  // ---------------- 协调器：批量长轮询 + 串行回写 ----------------
+
+  function startCoordinator() {
+    if (coordinatorStarted) return;
+    coordinatorStarted = true;
+    (async function loop() {
+      while (true) {
+        try {
+          await coordinatorStep();
+        } catch (err) {
+          log('监听循环出错：' + err.message, true);
+          await sleep(2000);
+        }
+      }
+    })();
+  }
+
+  async function coordinatorStep() {
+    var watching = registry.jobs.filter(isListening);
+    // 只盯最近活跃的若干个，防止 watch 的 ids 无限增长
+    watching.sort(function (a, b) {
+      return (b.appliedAt || b.at || 0) - (a.appliedAt || a.at || 0);
+    });
+    watching = watching.slice(0, MAX_WATCH_JOBS);
+    if (!watching.length) {
+      // 没有在等的任务：降级成健康检查，顺便把连接指示灯和 PS 现场状态刷新
+      await checkHealth();
+      await sleep(idleDelay());
       return;
     }
 
-    job = { id: created.id, meta: finalMeta };
-    rememberJob();
-    renderActions();
-
-    log('任务 ' + created.id + ' 已发送，等待 PS 回传');
-    await watchJob(created.id, finalMeta, token, 'wait');
-  }
-
-  /**
-   * 长轮询监听任务。
-   * mode='wait'：还没回写过，界面按「等 PS」置忙；
-   * 之后只要 PS 再传一次（updatedAt 比上次贴的更新），就自动覆盖同一图层。
-   * 超时不丢任务，点「继续等待」能接着守。
-   */
-  async function watchJob(jobId, meta, token, mode) {
-    var waiting = mode === 'wait';
-    if (waiting) {
-      setBusy(true);
-      renderJob(null, '等待 PS 编辑', true);
+    var base = await ensureBase();
+    if (!base) {
+      await sleep(5000);
+      return;
     }
 
-    var lastFailed = 0;
-    var rounds = 0;
-    // 还没回写过时最多等 240 轮（每轮 ≤25 秒）；回写后长期守着，等 PS 再覆盖
-    while (token === runToken) {
-      if (waiting) {
-        if (++rounds > 240) break;
-      } else {
-        rounds = 0;
-      }
-
-      var base = await ensureBase();
-      if (!base) {
-        await sleep(2000);
-        continue;
-      }
-
-      var status;
-      try {
-        var sr = await fetch(base + '/api/jobs/' + jobId + '/status?wait=25', { cache: 'no-store' });
-        if (sr.status === 404) {
-          log('任务 ' + jobId + ' 已不在桥接服务里（可能已过期）', true);
-          clearJob('任务过期');
-          return;
-        }
-        status = await sr.json();
-      } catch (err) {
-        activeBase = null;
-        await sleep(2000);
-        continue;
-      }
-
-      var appliedAt = (job && job.id === jobId && job.appliedAt) || 0;
-      if (status.status === 'ready') {
-        if (status.updatedAt > appliedAt) {
-          await applyReady(base, jobId, meta || (job && job.meta) || {}, status.updatedAt);
-          if (token !== runToken) return;
-          waiting = false;
-          await sleep(1000);
-        } else {
-          // 这份结果已经贴过（比如上次 ack 没发出去），补一次 ack 后慢点轮询
-          await fetch(base + '/api/jobs/' + jobId + '/ack', { method: 'POST' }).catch(function () {});
-          await sleep(2000);
-        }
-        continue;
-      }
-
-      if (status.status === 'done') {
-        // 已回写过：等 PS 再传。长轮询对「已结束」会立刻返回，这里自己降速
-        await sleep(2000);
-        continue;
-      }
-
-      if (status.status === 'failed') {
-        // 失败是「已结束」状态，长轮询会立刻返回；只提示一次，别把日志刷屏
-        if (status.updatedAt !== lastFailed) {
-          lastFailed = status.updatedAt;
-          log(status.error || 'PS 端处理失败', true);
-          waiting = false;
-          setBusy(false);
-          setState('PS 端失败 · 改完可重传');
-        }
-        await sleep(2000);
-      }
-    }
-
-    if (token !== runToken) return;
-    setBusy(false);
-    setState('监听暂停');
-    log('已暂停监听任务 ' + jobId + '，点「继续等待」可恢复', true);
-  }
-
-  /** 取回图片并写回原图层；贴完不解绑任务，PS 再传会覆盖同一图层 */
-  async function applyReady(base, jobId, meta, updatedAt) {
-    setState('取回结果', true);
+    var ids = watching.map(function (entry) { return entry.jobId; });
+    var roundStart = Date.now();
+    var payload;
     try {
-      var rr = await fetch(base + '/api/jobs/' + jobId + '/result', { cache: 'no-store' });
-      if (!rr.ok) throw new Error('取回结果失败 ' + rr.status);
-      var buf = await rr.arrayBuffer();
+      var res = await fetch(base + '/api/jobs/watch?ids=' + encodeURIComponent(ids.join(',')) + '&wait=25', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      payload = await res.json();
+    } catch (err) {
+      // 网络错误（或桥接服务还没这版接口）→ 重新探测端口，稍后再试
+      activeBase = null;
+      bridgeDot.className = 'dot bad';
+      applyPsState({ online: false, activeJobId: null, openJobIds: [], updatedAt: 0 });
+      await sleep(2000);
+      return;
+    }
 
+    bridgeDot.className = 'dot on';
+    applyPsState(payload && payload.ps);
+    var list = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
+    var seen = {};
+    for (var i = 0; i < list.length; i++) {
+      var remote = list[i];
+      if (!remote || !remote.id) continue;
+      seen[remote.id] = true;
+      dispatchRemote(base, remote);
+    }
+    // watch 会省略不存在的 id（契约 4.3）：剩下的就是已过期，保留 targetId 供「认出原图层」
+    for (var j = 0; j < ids.length; j++) {
+      if (!seen[ids[j]]) markExpired(ids[j]);
+    }
+
+    // 正常 watch 会挂满 25 秒；万一桥接端立即返回（异常/旧实现），这里限个速，别把面板转成热循环
+    var elapsed = Date.now() - roundStart;
+    if (elapsed < 300) await sleep(300 - elapsed);
+  }
+
+  function dispatchRemote(base, remote) {
+    var entry = findJob(remote.id);
+    if (!entry) return;
+    var updatedAt = Number(remote.updatedAt) || 0;
+
+    if (remote.status === 'ready') {
+      if (updatedAt > (entry.appliedAt || 0)) {
+        // 来了比已贴版本更新的结果：不管之前是正常等待、还是被 PS 取消/失败过，
+        // 都重置熔断计数并恢复监听 —— 「取消」只该停 PS 那边的会话，不是永久拒收
+        if (entry.state === 'failed') {
+          entry.state = 'watching';
+          delete lastFailure[entry.jobId];
+          log('任务 ' + entry.jobId + ' 收到新结果，已自动恢复监听');
+        }
+        if (entry.lastApplyTarget !== updatedAt) {
+          entry.lastApplyTarget = updatedAt;
+          delete applyFailures[entry.jobId];
+          resetRetry(entry.jobId);
+        }
+        saveRegistry();
+        renderList();
+        attemptApply(base, entry.jobId, updatedAt);
+      }
+      return;
+    }
+
+    if (remote.status === 'done') {
+      entry.state = 'done';
+      if (updatedAt > (entry.appliedAt || 0)) entry.appliedAt = updatedAt;
+      cancelRetry(entry.jobId);
+      delete uiStatus[entry.jobId];
+      saveRegistry();
+      renderList();
+      return;
+    }
+
+    if (remote.status === 'failed') {
+      entry.state = 'failed';
+      cancelRetry(entry.jobId);
+      delete uiStatus[entry.jobId];
+      if (lastFailure[entry.jobId] !== updatedAt) {
+        lastFailure[entry.jobId] = updatedAt;
+        log('任务 ' + entry.jobId + ' 失败：' + (remote.error || 'PS 端处理失败'), true);
+      }
+      saveRegistry();
+      renderList();
+    }
+    // awaiting-image / pending / editing → 继续等
+  }
+
+  function markExpired(jobId) {
+    var entry = findJob(jobId);
+    if (!isListening(entry)) return;
+    entry.state = 'expired';
+    cancelRetry(jobId);
+    delete uiStatus[jobId];
+    log('任务 ' + jobId + ' 已不在桥接服务里（可能已过期）；仍可用「认出原图层」', true);
+    saveRegistry();
+    renderList();
+  }
+
+  /** 主线程写回：postMessage apply-result（必须带 jobId），等 apply-done 回执 */
+  function sendApply(jobId, meta, buffer) {
+    return new Promise(function (resolve) {
+      var settled = false;
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        delete pendingApply[jobId];
+        resolve({ ok: false, error: '主线程写回超时' });
+      }, 60000);
+      pendingApply[jobId] = {
+        resolve: function (result) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          delete pendingApply[jobId];
+          resolve(result);
+        }
+      };
       parent.postMessage({
         pluginMessage: {
           type: 'apply-result',
+          jobId: jobId,
           reveal: true,
           meta: {
             targetId: meta.targetId,
@@ -483,140 +1078,243 @@
             nodeWidth: meta.nodeWidth,
             nodeHeight: meta.nodeHeight
           },
-          data: bytesToB64(new Uint8Array(buf))
+          data: bytesToB64(new Uint8Array(buffer))
         }
       }, '*');
-
-      await fetch(base + '/api/jobs/' + jobId + '/ack', { method: 'POST' }).catch(function () {});
-      log('已取回 ' + (buf.byteLength / 1024).toFixed(0) + 'KB，写回原图层');
-
-      if (job && job.id === jobId) {
-        job.appliedAt = updatedAt || Date.now();
-        rememberJob();
-        renderJob(meta, '已回写 · 守着这个图层', false);
-      }
-      setBusy(false);
-      log('PS 里改完再回传，会自动覆盖同一图层（任务 ' + jobId + '）');
-    } catch (err) {
-      setBusy(false);
-      setState('取回失败');
-      log(err.message, true);
-    }
+    });
   }
 
-  /** 插件重开后：拿上次记下的任务；不论什么状态都继续守着，PS 再传就覆盖 */
-  async function restore(value) {
-    var jobId = value && value.jobId;
-    if (!jobId) return;
+  async function attemptApply(base, jobId, updatedAt) {
+    var entry = findJob(jobId);
+    if (!isListening(entry)) return;
+    if (applying[jobId]) return;
+    var retry = retryState[jobId];
+    if (retry && retry.timer) return;
 
-    var meta = value.meta || {};
-    job = { id: jobId, meta: meta, appliedAt: value.appliedAt || 0 };
-    renderJob(meta, '检查任务', true);
-    renderActions();
-
-    var token = ++runToken;
-    var base = await ensureBase();
-    if (!base) {
-      setState('未连接');
-      log('暂时连不上桥接服务，恢复后会点「继续等待」重试', true);
-      return;
-    }
-
-    var status;
+    applying[jobId] = true;
+    setStatus(jobId, '取回结果…');
     try {
-      var res = await fetch(base + '/api/jobs/' + jobId, { cache: 'no-store' });
-      if (res.status === 404) {
-        log('上次的任务 ' + jobId + ' 已不在桥接服务里（可能已过期）', true);
-        clearJob('任务过期');
+      var rr;
+      try {
+        rr = await fetch(base + '/api/jobs/' + jobId + '/result', { cache: 'no-store' });
+      } catch (err) {
+        activeBase = null;
+        throw new Error('取回结果失败：' + err.message);
+      }
+      if (rr.status === 404) {
+        markExpired(jobId);
         return;
       }
-      status = await res.json();
+      if (!rr.ok) throw new Error('取回结果失败 ' + rr.status);
+
+      var buf = await rr.arrayBuffer();
+      setStatus(jobId, '写回图层…');
+      var reply = await sendApply(jobId, entry.meta || {}, buf);
+
+      if (!reply.ok) {
+        var reason = reply.error || '写回失败';
+        if (reason.indexOf('任务已失效') >= 0) {
+          entry.state = 'failed';
+          delete uiStatus[jobId];
+          log('任务 ' + jobId + ' 已不在注册表里，停止回写', true);
+          saveRegistry();
+          renderList();
+          return;
+        }
+        applyFailures[jobId] = (applyFailures[jobId] || 0) + 1;
+        if (applyFailures[jobId] >= MAX_APPLY_FAILURES) {
+          // 同一条不可修复的错误（例如 fallback 的容器拒绝 appendChild）不再无限退避（D4）
+          entry.state = 'failed';
+          delete uiStatus[jobId];
+          cancelRetry(jobId);
+          saveRegistry();
+          renderList();
+          log(
+            '任务 ' + jobId + ' 连续 ' + applyFailures[jobId] + ' 次写回失败，已停止重试：' + reason +
+              '；重新回传即可自动重试',
+            true
+          );
+          return;
+        }
+        throw new Error(reason);
+      }
+
+      // 只有主线程确认写回成功，appliedAt 才前移，才 ack
+      entry.appliedAt = updatedAt || Date.now();
+      delete uiStatus[jobId];
+      delete applyFailures[jobId];
+      saveRegistry();
+      renderList();
+      log('已回写任务 ' + jobId + '（' + nameOf(entry.meta) + '）');
+      resetRetry(jobId);
+      await ackResult(base, jobId, updatedAt);
     } catch (err) {
-      setState('未连接');
-      log('查询任务状态失败：' + err.message, true);
+      scheduleRetry(jobId, updatedAt, err.message || String(err));
+    } finally {
+      delete applying[jobId];
+    }
+  }
+
+  async function ackResult(base, jobId, updatedAt, attempt) {
+    attempt = attempt || 0;
+    try {
+      var res = await fetch(base + '/api/jobs/' + jobId + '/ack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ updatedAt: updatedAt || 0 })
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var data = await res.json();
+      if (data && data.ok === false) {
+        // stale：桥接那边已经有更新的结果，等下一轮 watch 再贴
+        log('ack 被拒绝（结果已更新），等待下一次回传', true);
+      }
+    } catch (err) {
+      if (attempt >= 3) {
+        log('ack 失败：' + err.message + '（结果更新时会再次贴图）', true);
+        return;
+      }
+      await sleep(2000 * Math.pow(2, attempt));
+      return ackResult(base, jobId, updatedAt, attempt + 1);
+    }
+  }
+
+  function scheduleRetry(jobId, updatedAt, reason) {
+    var entry = findJob(jobId);
+    if (!isListening(entry)) return;
+    var retry = retryState[jobId] || (retryState[jobId] = { count: 0, timer: null, updatedAt: 0 });
+    if (retry.timer) return;
+    var delay = RETRY_DELAYS[Math.min(retry.count, RETRY_DELAYS.length - 1)];
+    retry.count++;
+    retry.updatedAt = updatedAt || 0;
+    setStatus(jobId, '写回失败 · ' + Math.round(delay / 1000) + 's 后重试');
+    log('任务 ' + jobId + ' ' + reason + '；' + Math.round(delay / 1000) + ' 秒后重试（第 ' + retry.count + ' 次）', true);
+    retry.timer = setTimeout(function () {
+      retry.timer = null;
+      attemptApply(activeBase || server(), jobId, retry.updatedAt);
+    }, delay);
+  }
+
+  function resetRetry(jobId) {
+    var retry = retryState[jobId];
+    if (!retry) return;
+    if (retry.timer) clearTimeout(retry.timer);
+    delete retryState[jobId];
+  }
+
+  function cancelRetry(jobId) {
+    resetRetry(jobId);
+  }
+
+  // ---------------- 任务操作 ----------------
+
+  function locateEntry(jobId) {
+    var entry = findJob(jobId);
+    if (!entry || !entry.meta || !entry.meta.targetId) {
+      log('这个任务还没有可定位的原图层', true);
+      return;
+    }
+    parent.postMessage({ pluginMessage: { type: 'find-target', targetId: entry.meta.targetId } }, '*');
+  }
+
+  function stopEntry(jobId) {
+    var entry = findJob(jobId);
+    if (!entry) return;
+    cancelRetry(jobId);
+    delete uiStatus[jobId];
+    delete applyFailures[jobId];
+
+    // 「停止」是唯一的硬停止：必须落到 stopped。
+    // 不能用 failed —— 0.2.2 起 failed 仍会继续监听，设成 failed 等于没停住。
+    var wasApplied = !!entry.appliedAt;
+    entry.state = 'stopped';
+    saveRegistry();
+    renderList();
+
+    if (wasApplied) {
+      // 已经回写过：只停监听，记录留着（还能「认出原图层」）；不惊动服务端
+      log('已停止监听任务 ' + jobId + '；记录还在，点「继续等待」可恢复监听');
       return;
     }
 
-    log('找到上次的任务 ' + jobId + '（' + status.status + '）');
+    log('已取消任务 ' + jobId + '（还没回写过，已通知 PS 端放弃）');
+    // 还没回写过：通知服务端标记失败，否则 PS 面板会一直把这个任务占着
+    fetch((activeBase || server()) + '/api/jobs/' + jobId + '/fail', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: '已在 Figma 端取消' })
+    }).catch(function () {});
+  }
 
-    if (status.status === 'ready' && status.updatedAt > job.appliedAt) {
-      await applyReady(base, jobId, meta, status.updatedAt);
-    } else if (status.status === 'done') {
-      log('任务 ' + jobId + ' 之前已经回写过；PS 里改完再传，会自动覆盖同一图层');
-      setState('已回写 · 守着这个图层');
-    } else if (status.status === 'failed') {
-      log((status.error || 'PS 端处理失败') + '；改完可在 PS 里重新回传');
-      setState('PS 端失败 · 改完可重传');
+  function resumeAll() {
+    var changed = 0;
+    for (var i = 0; i < registry.jobs.length; i++) {
+      var entry = registry.jobs[i];
+      // done 现在默认就在监听，只有被停止/失败/过期的才需要恢复
+      if (!isListening(entry)) {
+        entry.state = 'watching';
+        delete uiStatus[entry.jobId];
+        delete lastFailure[entry.jobId];
+        delete applyFailures[entry.jobId];
+        cancelRetry(entry.jobId);
+        changed++;
+      }
     }
-
-    // awaiting-image / pending / editing 显示成等待，其它状态静默守着
-    var live = status.status === 'awaiting-image' || status.status === 'pending' || status.status === 'editing';
-    await watchJob(jobId, meta, token, live ? 'wait' : 'idle');
+    if (!changed) {
+      log('没有需要继续等待的任务');
+      return;
+    }
+    saveRegistry();
+    renderList();
+    log('已把 ' + changed + ' 个任务重新加入监听');
+    startCoordinator();
   }
 
-  function sleep(ms) {
-    return new Promise(function (r) { setTimeout(r, ms); });
+  function clearFinished() {
+    var kept = [];
+    var removed = 0;
+    for (var i = 0; i < registry.jobs.length; i++) {
+      var entry = registry.jobs[i];
+      if (isListening(entry)) {
+        kept.push(entry);
+      } else {
+        cancelRetry(entry.jobId);
+        delete uiStatus[entry.jobId];
+        delete lastFailure[entry.jobId];
+        delete applyFailures[entry.jobId];
+        removed++;
+      }
+    }
+    if (!removed) {
+      log('没有可清空的任务');
+      return;
+    }
+    registry.jobs = kept;
+    saveRegistry();
+    renderList();
+    log('已清空 ' + removed + ' 个任务记录');
   }
 
-  // 面板一打开就按「无任务」把按钮置灰
-  renderActions();
+  // ---------------- 事件绑定 ----------------
+
+  renderList();
+  renderSendButton();
 
   sendBtn.addEventListener('click', function () {
+    if (sending) return;
     if (!selection.count) {
-      log('请先在画布上选中一张图片或画框', true);
+      log('请先在画布上选中图片或画框', true);
       return;
     }
-    if (busy) return;
-    taskMeta.textContent = '正在取源图…';
-    setState('读取中', true);
+    // 立即置忙：双击时第二次点击直接返回，不会产生重复任务
+    sending = true;
+    renderSendButton();
+    log('正在读取选中图层的源图…');
     parent.postMessage({ pluginMessage: { type: 'send-request' } }, '*');
   });
 
-  // 认出原图层：按保存的 nodeId 定位，不要求当前选中
-  locateBtn.addEventListener('click', function () {
-    if (!job || !job.meta || !job.meta.targetId) {
-      log('还没有可定位的原图层', true);
-      return;
-    }
-    parent.postMessage({ pluginMessage: { type: 'find-target', targetId: job.meta.targetId } }, '*');
-  });
-
-  resumeBtn.addEventListener('click', function () {
-    if (!job || busy) return;
-    var token = ++runToken;
-    watchJob(job.id, job.meta, token, job.appliedAt ? 'idle' : 'wait').catch(function (err) {
-      log(err.message, true);
-      setBusy(false);
-    });
-  });
-
-  cancelBtn.addEventListener('click', function () {
-    runToken++;
-    var id = job ? job.id : null;
-    var wasBusy = busy;
-    setBusy(false);
-
-    // 已经回写过的任务：只停监听，记录留着（还能「认出原图层」、还能被 PS 覆盖）
-    if (job && job.appliedAt) {
-      setState('已停止监听 · 改完可重传');
-      log('已停止监听任务 ' + id + '；记录还在，点「继续等待」可恢复监听');
-      renderActions();
-      return;
-    }
-
-    job = null;
-    rememberJob();
-    setState('已取消');
-    renderActions();
-    if (id && wasBusy) {
-      // 让服务端把任务标记为失败，否则 PS 端会一直被这个任务「占着」
-      fetch((activeBase || server()) + '/api/jobs/' + id + '/fail', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error: '已在 Figma 端取消' })
-      }).catch(function () {});
-    }
-  });
+  resumeBtn.addEventListener('click', resumeAll);
+  clearBtn.addEventListener('click', clearFinished);
 
   window.onmessage = function (event) {
     var msg = event.data && event.data.pluginMessage;
@@ -630,48 +1328,66 @@
 
     if (msg.type === 'selection') {
       selection = msg;
-      // 任务记录会长期保留，选中新对象时只更新目标名，不打断任务状态
-      if (!busy && (!job || msg.count)) {
-        taskName.textContent = msg.count ? msg.name : '未选择';
-        if (!msg.count && !job) {
-          taskMeta.textContent = '请选中一个带图片的图层或画框';
-          setState('待发送');
-        }
-      }
+      renderSendButton();
+      hintEl.textContent = msg.count
+        ? '已选中 ' + msg.count + ' 个图层'
+        : '选中图片 → 发送到 PS → PS 里改完点「保存回传」';
       return;
     }
 
-    if (msg.type === 'send-payload') {
-      upload(msg.meta, msg.data).catch(function (err) {
+    if (msg.type === 'send-payloads') {
+      // 主线程把每个选中节点打包好（可能为空数组 = 全部被跳过/失败）
+      handleSendPayloads(msg.items || []).catch(function (err) {
         log(err.message, true);
-        setState('出错');
-        setBusy(false);
+        sending = false;
+        renderSendButton();
       });
       return;
     }
 
-    // clientStorage 里取回上次的任务（只有启动时主动问的那次才处理）
-    if (msg.type === 'pending-job') {
-      if (!awaitingPending) return;
-      awaitingPending = false;
-      if (msg.value) {
-        restore(msg.value).catch(function (err) {
-          log(err.message, true);
-          setState('出错');
-          setBusy(false);
-        });
+    if (msg.type === 'jobs') {
+      // 只有启动时主动 load-jobs 的那次才采用；save-jobs 的回显忽略，避免覆盖本地正在改的状态
+      if (registryLoaded) return;
+      registryLoaded = true;
+      registry = normalizeValue(msg.value);
+      resolveRegistryReady();
+      renderList();
+      if (registry.jobs.length) log('已恢复 ' + registry.jobs.length + ' 个任务记录');
+      startCoordinator();
+      return;
+    }
+
+    if (msg.type === 'apply-done') {
+      var waiting = pendingApply[msg.jobId];
+      if (waiting) {
+        delete pendingApply[msg.jobId];
+        waiting.resolve({ ok: !!msg.ok, error: msg.error || '' });
+      }
+      if (!msg.ok) log('写回失败：' + (msg.error || '未知原因'), true);
+      return;
+    }
+
+    if (msg.type === 'thumb-result') {
+      var thumbEntry = findJob(msg.jobId);
+      if (thumbEntry) {
+        // data 为空表示拿不到（原图层已删/不支持导出），记 'none' 免得反复重试
+        thumbEntry.thumb = msg.data ? ('data:image/png;base64,' + msg.data) : 'none';
+        saveRegistry();
+        renderList();
       }
       return;
     }
 
     if (msg.type === 'fallback-created') {
-      // 以后这张新图层就是原图层，再回传直接覆盖它
-      if (job && job.meta) {
-        job.meta.targetId = msg.targetId;
-        job.meta.targetName = msg.name;
-        job.meta.paintIndex = 0;
-        job.meta.fallback = false;
-        rememberJob();
+      var entry = findJob(msg.jobId);
+      if (entry) {
+        entry.meta = entry.meta || {};
+        entry.meta.targetId = msg.targetId;
+        entry.meta.targetName = msg.name;
+        entry.meta.paintIndex = 0;
+        entry.meta.fallback = false;
+        saveRegistry();
+        renderList();
         log('记下新图层「' + msg.name + '」，下次回传会覆盖它');
       }
       return;
@@ -687,22 +1403,40 @@
       return;
     }
 
-    if (msg.type === 'error' || msg.type === 'diag') {
+    if (msg.type === 'diag') {
       log(msg.message, true);
-      setState('出错');
-      setBusy(false);
+      return;
     }
   };
 
-  // 面板打开后主动问一次当前选中（有些情况 selectionchange 不会补发）
+  // 面板打开后主动问一次当前选中（有些情况 selectionchange 不会补发），再取注册表
   parent.postMessage({ pluginMessage: { type: 'request-selection' } }, '*');
+  parent.postMessage({ pluginMessage: { type: 'load-jobs' } }, '*');
+  startCoordinator();
+  checkHealth();
 
-  checkHealth().then(function () {
-    // 顺便看看上次有没有没贴完的任务
-    awaitingPending = true;
-    parent.postMessage({ pluginMessage: { type: 'load-pending' } }, '*');
-  });
-  setInterval(checkHealth, 5000);
+  // 有任务在监听时也定期刷一下 PS 在线状态（watch 本身不返回 psOnline）
+  // 自适应节奏：面板有焦点时 3 秒，切到后台 15 秒（空闲时的节奏在 coordinatorStep 里）
+  // 有任务在监听时由长轮询驱动 PS 状态刷新，这里只在“没有监听任务”时补一轮，避免双倍请求
+  function healthTick() {
+    var anyListening = false;
+    for (var i = 0; i < registry.jobs.length; i++) {
+      if (isListening(registry.jobs[i])) { anyListening = true; break; }
+    }
+    if (!anyListening) checkHealth().catch(function () {});
+    setTimeout(healthTick, idleDelay());
+  }
+  setTimeout(healthTick, idleDelay());
+
+  // 从后台切回来时立刻刷一次，别等下一轮
+  try {
+    window.addEventListener('focus', function () { checkHealth().catch(function () {}); });
+  } catch (e) { /* 宿主不支持时忽略 */ }
+  try {
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') checkHealth().catch(function () {});
+    });
+  } catch (e) { /* 宿主不支持时忽略 */ }
 })();
 </script>
 </body>

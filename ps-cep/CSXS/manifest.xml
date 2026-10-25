@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ExtensionManifest Version="7.0"
                    ExtensionBundleId="com.figma.ps.bridge"
-                   ExtensionBundleVersion="0.1.0"
+                   ExtensionBundleVersion="0.3.3"
                    ExtensionBundleName="Figma 桥接"
                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.figma.ps.bridge.panel" Version="0.1.0"/>
+    <Extension Id="com.figma.ps.bridge.panel" Version="0.3.3"/>
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
