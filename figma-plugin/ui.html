@@ -157,14 +157,31 @@
     background: var(--brand); color: var(--onbrand);
   }
   .psbadge.soft { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+
+  /* ---- 最小化：缩成一条小横条，监听照常跑 ---- */
+  #miniState {
+    display: none;
+    flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 10px; font-weight: 400; color: var(--muted);
+  }
+  body.min #miniState { display: block; }
+  body.min h1 .grow { display: none; }
+  body.min #settingsToggle { display: none; }
+  body.min .topmore, body.min .psline, body.min #send, body.min .actions,
+  body.min .list-title, body.min .list, body.min .log-title, body.min .log { display: none; }
+  body.min { padding: 9px 10px; }
+  body.min h1 { cursor: pointer; }
 </style>
 </head>
 <body>
-  <h1>
+  <h1 id="titleBar">
     PS 桥接
     <span class="dot" id="bridgeDot"></span><span class="dot" id="psDot"></span>
     <span class="grow"></span>
+    <span id="miniState"></span>
     <button class="icon-btn" id="settingsToggle" title="显示/隐藏说明与桥接地址">⚙</button>
+    <button class="icon-btn" id="minToggle" title="收起面板（监听照常）">—</button>
   </h1>
 
   <div class="topmore collapsed" id="topMore">
@@ -213,6 +230,9 @@
   var logChev = document.getElementById('logChev');
   var logBadge = document.getElementById('logBadge');
   var filterBtn = document.getElementById('filterBtn');
+  var titleBar = document.getElementById('titleBar');
+  var minToggle = document.getElementById('minToggle');
+  var miniState = document.getElementById('miniState');
 
   var selection = { count: 0, name: '' };
   // 与 bridge/server.py、ps-cep/js/main.js 保持一致
@@ -289,6 +309,52 @@
 
   applyTopOpen();
   applyLogOpen();
+
+  // ---------------- 最小化：缩成一条小横条 ----------------
+  // 收起只是视觉上的：协调器/长轮询在 iframe 里照常跑，PS 回传仍会自动贴回。
+  // 宽高由主线程 ui-resize 决定；开合状态持久化，重开面板保持上次的样子。
+
+  var minimized = store.get('ps-bridge-min') === '1';
+
+  function updateMiniState() {
+    if (!minimized) return;
+    var text;
+    if (sending) {
+      text = '发送中…';
+    } else {
+      var n = 0;
+      for (var i = 0; i < registry.jobs.length; i++) {
+        if (isListening(registry.jobs[i])) n++;
+      }
+      text = n ? n + ' 个监听中' : '空闲';
+    }
+    if (miniState.textContent !== text) miniState.textContent = text;
+  }
+
+  function applyMin() {
+    document.body.className = minimized ? 'min' : '';
+    minToggle.textContent = minimized ? '▢' : '—';
+    minToggle.title = minimized ? '展开面板' : '收起面板（监听照常）';
+    updateMiniState();
+    parent.postMessage({ pluginMessage: { type: 'ui-resize', minimized: minimized } }, '*');
+  }
+
+  minToggle.addEventListener('click', function (event) {
+    event.stopPropagation();
+    minimized = !minimized;
+    store.set('ps-bridge-min', minimized ? '1' : '0');
+    applyMin();
+  });
+
+  // 收起时点横条任意位置即可展开
+  titleBar.addEventListener('click', function () {
+    if (!minimized) return;
+    minimized = false;
+    store.set('ps-bridge-min', '0');
+    applyMin();
+  });
+
+  applyMin();
 
   // ---------------- PS 现场状态（只读） ----------------
   // 桥接服务把 PS 面板上报的 {activeJobId, openJobIds} 透传过来，
@@ -680,6 +746,7 @@
     var total = registry.jobs.length;
     countEl.textContent = filterActive ? (shown.length + ' / ' + total) : String(total);
     renderFilterBtn();
+    updateMiniState();
 
     if (!shown.length) {
       var empty = document.createElement('div');
@@ -738,6 +805,7 @@
     sendBtn.textContent = sending
       ? '发送中…'
       : (selection.count ? '发送 ' + selection.count + ' 个到 PS' : '发送选中到 PS');
+    updateMiniState();
   }
 
   // ---------------- 端口探测 / 健康检查 ----------------

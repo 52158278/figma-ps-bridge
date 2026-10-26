@@ -40,6 +40,8 @@ figma.ui.onmessage = async (msg) => {
         return await saveJobs(msg.value);
       case 'thumb-request':
         return await sendThumbnail(msg.jobId, msg.targetId);
+      case 'ui-resize':
+        return resizeUi(!!msg.minimized);
       default:
         return;
     }
@@ -52,6 +54,14 @@ figma.ui.onmessage = async (msg) => {
 
 function errorText(err) {
   return String(err && err.message ? err.message : err);
+}
+
+// 最小化：缩成一条不挡画布的小横条；监听在 iframe 里照常跑
+function resizeUi(minimized) {
+  try {
+    if (minimized) figma.ui.resize(240, 46);
+    else figma.ui.resize(320, 560);
+  } catch (err) { /* 老宿主不支持 resize 时忽略 */ }
 }
 
 // ---------------- 注册表（clientStorage key = jobs） ----------------
