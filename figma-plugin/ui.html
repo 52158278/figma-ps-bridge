@@ -168,10 +168,17 @@
   body.min #miniState { display: block; }
   body.min h1 .grow { display: none; }
   body.min #settingsToggle { display: none; }
-  body.min .topmore, body.min .psline, body.min #send, body.min .actions,
+  body.min .topmore, body.min .psline, body.min #send, body.min .cropbar, body.min .actions,
   body.min .list-title, body.min .list, body.min .log-title, body.min .log { display: none; }
   body.min { padding: 9px 10px; }
   body.min h1 { cursor: pointer; }
+  .cropbar {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 5px; font-size: 10px; color: var(--muted); gap: 6px;
+  }
+  .cropbar label { margin: 0; cursor: pointer; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .cropbar input[type="checkbox"] { width: 11px; height: 11px; padding: 0; cursor: pointer; }
+  .cropbar .note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -193,6 +200,11 @@
   <div class="psline" id="psline">PS 状态未知</div>
 
   <button class="primary" id="send">发送选中到 PS</button>
+
+  <div class="cropbar">
+    <label><input type="checkbox" id="cropMode"> 裁剪模式</label>
+    <span class="note" id="cropNote">发送 Figma 里看到的样子（含裁切），不是完整原图</span>
+  </div>
 
   <div class="actions">
     <button id="resume" title="把已停止/过期的任务重新加入监听">继续等待</button>
@@ -233,6 +245,7 @@
   var titleBar = document.getElementById('titleBar');
   var minToggle = document.getElementById('minToggle');
   var miniState = document.getElementById('miniState');
+  var cropModeEl = document.getElementById('cropMode');
 
   var selection = { count: 0, name: '' };
   // 与 bridge/server.py、ps-cep/js/main.js 保持一致
@@ -275,6 +288,11 @@
   serverInput.value = (store.get('ps-bridge-server') || 'http://localhost:8765').replace('127.0.0.1', 'localhost');
   serverInput.addEventListener('change', function () {
     store.set('ps-bridge-server', server());
+  });
+  // 裁剪模式开关：开启后发 Figma 画布上看到的样子（含裁切、透明度等），不是完整原图
+  cropModeEl.checked = store.get('ps-bridge-crop-mode') === '1';
+  cropModeEl.addEventListener('change', function () {
+    store.set('ps-bridge-crop-mode', cropModeEl.checked ? '1' : '0');
   });
 
   // ---------------- 面板折叠（顶部信息 / 运行日志） ----------------
@@ -1378,7 +1396,7 @@
     sending = true;
     renderSendButton();
     log('正在读取选中图层的源图…');
-    parent.postMessage({ pluginMessage: { type: 'send-request' } }, '*');
+    parent.postMessage({ pluginMessage: { type: 'send-request', cropMode: cropModeEl.checked } }, '*');
   });
 
   resumeBtn.addEventListener('click', resumeAll);

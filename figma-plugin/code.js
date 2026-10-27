@@ -26,7 +26,7 @@ figma.ui.onmessage = async (msg) => {
     if (!msg || !msg.type) return;
     switch (msg.type) {
       case 'send-request':
-        return await handleSendRequest();
+        return await handleSendRequest(!!msg.cropMode);
       case 'apply-result':
         // 串行执行：多个 job 同时回传时按顺序写画布，避免 fills 互相覆盖
         return enqueueApply(() => runApplyResult(msg));
@@ -304,9 +304,11 @@ function findImagePaint(node, depth = 0) {
   return null;
 }
 
-/** 单个节点 → {meta, data}：有原图用原图字节，否则按倍率渲染导出 */
-async function buildPayload(node, found) {
-  if (found) {
+/** 单个节点 → {meta, data}：裁剪模式下就算找到图片填充也用 render 导出（烘焙 Figma 显示效果）；
+ *  非裁剪模式优先走原图字节（保留完整分辨率），没有图片填充时退回 render */
+async function buildPayload(node, found, cropMode) {
+  // 裁剪模式：发 Figma 画布上看到的样子（含裁切、透明度、子图层），不发完整原图
+  if (found && !cropMode) {
     const image = figma.getImageByHash(found.paint.imageHash);
     if (!image) throw new Error('图片原始数据不可用（可能来自团队库或已失效）');
     const bytes = await image.getBytesAsync();
@@ -329,24 +331,26 @@ async function buildPayload(node, found) {
     };
   }
 
+  // render 路径：不管是裁剪模式（found + cropMode）还是 fallback（没 found），
+  // 都用 node.exportAsync 导出节点可见部分。不同的只是 meta.mode 和 fallback 标记。
   const longest = Math.max(node.width, node.height, 1);
-  // 旧公式 min(4, max(2, ceil(4096/longest))) 对 3000px 画框会导出 6000px、5000px 会导出 10000px；
-  // 改成 clamp(1, 4, 4096/longest)：长边尽量不超过 4096，也不低于 1 倍。
-  // 倍率向下取整到 2 位小数，避免四舍五入又把长边顶过 4096
   const rawScale = Math.min(MAX_EXPORT_SCALE, Math.max(1, EXPORT_LONGEST / longest));
   const scale = Math.floor(rawScale * 100) / 100;
   const bytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
+
+  const isCrop = !!(found && cropMode);
   return {
     meta: {
-      targetId: node.id,
-      targetName: node.name,
+      targetId: found ? found.owner.id : node.id,
+      targetName: found ? found.owner.name : node.name,
       nodeName: node.name,
-      nodeWidth: Math.round(node.width),
-      nodeHeight: Math.round(node.height),
+      nodeWidth: Math.round((found ? found.owner : node).width),
+      nodeHeight: Math.round((found ? found.owner : node).height),
       imageWidth: Math.round(node.width * scale),
       imageHeight: Math.round(node.height * scale),
-      mode: 'render',
-      fallback: true,
+      paintIndex: found ? found.index : -1,
+      mode: isCrop ? 'crop' : 'render',
+      fallback: !found, // 裁剪模式虽走 render，但仍定位到原 fill；只有真找不到图片填充才 fallback
       exportScale: scale
     },
     data: figma.base64Encode(bytes)
@@ -354,7 +358,7 @@ async function buildPayload(node, found) {
 }
 
 /** 遍历选中全部节点；已在处理中的 targetId 跳过；单节点失败不影响其它节点 */
-async function handleSendRequest() {
+async function handleSendRequest(cropMode = false) {
   const items = [];
   const problems = [];
   try {
@@ -378,9 +382,8 @@ async function handleSendRequest() {
         continue;
       }
       try {
-        const payload = await buildPayload(node, found);
+        const payload = await buildPayload(node, found, cropMode);
         items.push(payload);
-        // 同一次选中里若父子都被选中，后一个也要跳过
         busyTargets[payload.meta.targetId] = true;
       } catch (err) {
         problems.push('「' + displayName + '」读取失败：' + errorText(err));
@@ -449,16 +452,18 @@ async function applyResult(msg) {
       // 发出去的是完整原图：尺寸没变（PS 里只调色/修图）就保留原填充的 scaleMode 与
       // imageTransform，画布上的裁切/位置完全不变；尺寸变了（PS 里裁过图）说明新旧图
       // 坐标系对不上，改用 FILL + 单位矩阵，保证不出现错位或空白边
+      // 裁剪模式（mode:'crop'）同理，但不同尺寸时用 CROP 代替 FILL，避免拉伸变形
       const size = await image.getSizeAsync();
       const sameSize =
         Math.abs(size.width - (meta.imageWidth || 0)) <= 1 &&
         Math.abs(size.height - (meta.imageHeight || 0)) <= 1;
+      const useCrop = meta.mode === 'crop';
       fills[index] = sameSize
         ? { ...fills[index], imageHash: image.hash, visible: true }
         : {
             ...fills[index],
             type: 'IMAGE',
-            scaleMode: 'FILL',
+            scaleMode: useCrop ? 'CROP' : 'FILL',
             imageTransform: [[1, 0, 0], [0, 1, 0]],
             imageHash: image.hash,
             visible: true
