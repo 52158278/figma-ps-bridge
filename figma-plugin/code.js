@@ -304,54 +304,108 @@ function findImagePaint(node, depth = 0) {
   return null;
 }
 
-/** 单个节点 → {meta, data}：裁剪模式下就算找到图片填充也用 render 导出（烘焙 Figma 显示效果）；
- *  非裁剪模式优先走原图字节（保留完整分辨率），没有图片填充时退回 render */
+/** 根据 imageTransform 算出 Figma 在原图上实际显示的矩形（裁剪区域）
+ *  imageTransform = [[a,b,tx],[c,d,ty]] 把图像像素点 (px,py) 映射到节点局部坐标 (nx,ny)
+ *  节点显示区域是 [0, nodeW]×[0, nodeH]，所以逆变换节点四个角点回到图像空间，
+ *  取其 bounding box 并 clamp 到 [0, origW]×[0, origH] 即可。
+ *  变换不可逆（det ≈ 0）时返回 null，让调用方 fallback 到 render 路径 */
+function computeCropRect(transform, nodeW, nodeH, origW, origH) {
+  const m = transform || [[1, 0, 0], [0, 1, 0]];
+  const a = m[0][0], b = m[0][1], tx = m[0][2];
+  const c = m[1][0], d = m[1][1], ty = m[1][2];
+  const det = a * d - b * c;
+  if (Math.abs(det) < 1e-9) return null;
+  // 逆变换矩阵：把节点局部坐标 (nx,ny) 映射回图像像素坐标 (px,py)
+  const ia = d / det, ib = -b / det, itx = (b * ty - d * tx) / det;
+  const ic = -c / det, id_ = a / det, ity = (c * tx - a * ty) / det;
+  const corners = [
+    [0, 0], [nodeW, 0], [0, nodeH], [nodeW, nodeH]
+  ].map(([nx, ny]) => [ia * nx + ib * ny + itx, ic * nx + id_ * ny + ity]);
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [px, py] of corners) {
+    if (px < minX) minX = px; if (px > maxX) maxX = px;
+    if (py < minY) minY = py; if (py > maxY) maxY = py;
+  }
+  minX = Math.max(0, minX); minY = Math.max(0, minY);
+  maxX = Math.min(origW, maxX); maxY = Math.min(origH, maxY);
+  const w = Math.round(maxX - minX);
+  const h = Math.round(maxY - minY);
+  if (w < 1 || h < 1) return null;
+  return { x: Math.round(minX), y: Math.round(minY), w, h };
+}
+
+/** 单个节点 → {meta, data}：
+ *  - 非裁剪模式 + 有图片填充：getImageByHash 拿完整原图像素（保持原始分辨率）
+ *  - 裁剪模式 + 有图片填充：getImageByHash 拿原图，算出 Figma 显示的裁剪矩形，
+ *    把原图+裁剪元数据交给 UI iframe 用 canvas 在原始分辨率下裁出那块
+ *  - 没图片填充：退化为 node.exportAsync 渲染 */
 async function buildPayload(node, found, cropMode) {
-  // 裁剪模式：发 Figma 画布上看到的样子（含裁切、透明度、子图层），不发完整原图
-  if (found && !cropMode) {
+  if (found) {
     const image = figma.getImageByHash(found.paint.imageHash);
     if (!image) throw new Error('图片原始数据不可用（可能来自团队库或已失效）');
     const bytes = await image.getBytesAsync();
     if (!bytes || !bytes.length) throw new Error('读取原图失败');
     const size = await image.getSizeAsync();
+
+    // 裁剪模式：算出 Figma 画布上实际显示的那块矩形，发给 UI iframe 在原始分辨率下裁
+    if (cropMode) {
+      const nodeW = Math.max(1, Math.round(found.owner.width));
+      const nodeH = Math.max(1, Math.round(found.owner.height));
+      const rect = computeCropRect(found.paint.imageTransform, nodeW, nodeH, size.width, size.height);
+      if (!rect) {
+        // 极端情况（变换不可逆）→ fallback 到 render 路径，别让用户卡住
+        const longest = Math.max(node.width, node.height, 1);
+        const rawScale = Math.min(MAX_EXPORT_SCALE, Math.max(1, EXPORT_LONGEST / longest));
+        const scale = Math.floor(rawScale * 100) / 100;
+        const fallbackBytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
+        return {
+          meta: {
+            targetId: found.owner.id, targetName: found.owner.name, nodeName: node.name,
+            nodeWidth: nodeW, nodeHeight: nodeH,
+            imageWidth: Math.round(node.width * scale), imageHeight: Math.round(node.height * scale),
+            paintIndex: found.index, mode: 'render', fallback: false, exportScale: scale
+          },
+          data: figma.base64Encode(fallbackBytes)
+        };
+      }
+      return {
+        meta: {
+          targetId: found.owner.id, targetName: found.owner.name, nodeName: node.name,
+          nodeWidth: nodeW, nodeHeight: nodeH,
+          imageWidth: rect.w, imageHeight: rect.h, // 这就是裁剪后要回写的尺寸
+          originalWidth: size.width, originalHeight: size.height,
+          cropX: rect.x, cropY: rect.y, cropW: rect.w, cropH: rect.h,
+          paintIndex: found.index, mode: 'crop', fallback: false
+        },
+        // 发原始图 bytes；UI iframe 看到 mode='crop' 会按 cropX/Y/W/H 用 canvas 裁出那块再上传
+        data: figma.base64Encode(bytes)
+      };
+    }
+
+    // 非裁剪模式：发完整原图
     return {
       meta: {
-        targetId: found.owner.id,
-        targetName: found.owner.name,
-        nodeName: node.name,
-        nodeWidth: Math.round(found.owner.width),
-        nodeHeight: Math.round(found.owner.height),
-        imageWidth: size.width,
-        imageHeight: size.height,
-        paintIndex: found.index,
-        mode: 'origin',
-        fallback: false
+        targetId: found.owner.id, targetName: found.owner.name, nodeName: node.name,
+        nodeWidth: Math.round(found.owner.width), nodeHeight: Math.round(found.owner.height),
+        imageWidth: size.width, imageHeight: size.height,
+        paintIndex: found.index, mode: 'origin', fallback: false
       },
       data: figma.base64Encode(bytes)
     };
   }
 
-  // render 路径：不管是裁剪模式（found + cropMode）还是 fallback（没 found），
-  // 都用 node.exportAsync 导出节点可见部分。不同的只是 meta.mode 和 fallback 标记。
+  // 没图片填充 → render 路径
   const longest = Math.max(node.width, node.height, 1);
   const rawScale = Math.min(MAX_EXPORT_SCALE, Math.max(1, EXPORT_LONGEST / longest));
   const scale = Math.floor(rawScale * 100) / 100;
   const bytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
-
-  const isCrop = !!(found && cropMode);
   return {
     meta: {
-      targetId: found ? found.owner.id : node.id,
-      targetName: found ? found.owner.name : node.name,
-      nodeName: node.name,
-      nodeWidth: Math.round((found ? found.owner : node).width),
-      nodeHeight: Math.round((found ? found.owner : node).height),
-      imageWidth: Math.round(node.width * scale),
-      imageHeight: Math.round(node.height * scale),
-      paintIndex: found ? found.index : -1,
-      mode: isCrop ? 'crop' : 'render',
-      fallback: !found, // 裁剪模式虽走 render，但仍定位到原 fill；只有真找不到图片填充才 fallback
-      exportScale: scale
+      targetId: node.id, targetName: node.name, nodeName: node.name,
+      nodeWidth: Math.round(node.width), nodeHeight: Math.round(node.height),
+      imageWidth: Math.round(node.width * scale), imageHeight: Math.round(node.height * scale),
+      mode: 'render', fallback: true, exportScale: scale
     },
     data: figma.base64Encode(bytes)
   };
@@ -449,25 +503,39 @@ async function applyResult(msg) {
       index = fills.findIndex((f) => f.type === 'IMAGE');
     }
     if (index >= 0) {
-      // 发出去的是完整原图：尺寸没变（PS 里只调色/修图）就保留原填充的 scaleMode 与
-      // imageTransform，画布上的裁切/位置完全不变；尺寸变了（PS 里裁过图）说明新旧图
-      // 坐标系对不上，改用 FILL + 单位矩阵，保证不出现错位或空白边
-      // 裁剪模式（mode:'crop'）同理，但不同尺寸时用 CROP 代替 FILL，避免拉伸变形
       const size = await image.getSizeAsync();
       const sameSize =
         Math.abs(size.width - (meta.imageWidth || 0)) <= 1 &&
         Math.abs(size.height - (meta.imageHeight || 0)) <= 1;
-      const useCrop = meta.mode === 'crop';
-      fills[index] = sameSize
-        ? { ...fills[index], imageHash: image.hash, visible: true }
-        : {
-            ...fills[index],
-            type: 'IMAGE',
-            scaleMode: useCrop ? 'CROP' : 'FILL',
-            imageTransform: [[1, 0, 0], [0, 1, 0]],
-            imageHash: image.hash,
-            visible: true
-          };
+
+      if (meta.mode === 'crop') {
+        // 裁剪模式：发出去的已经是「Figma 可见部分」的原始分辨率裁块。
+        // 旧 fill 的 scaleMode/imageTransform 是为完整原图设计的，套在裁块上会指错坐标。
+        // 所以一律用 CROP + identity：让这张裁块直接填满节点显示区域即可。
+        // 若 PS 里没改尺寸（常见），CROP + identity 刚好 1:1 对齐；
+        // 若 PS 改了尺寸，CROP 保证不变形（可能裁掉 PS 加的边），FILL 才会拉伸。
+        fills[index] = {
+          ...fills[index],
+          type: 'IMAGE',
+          scaleMode: 'CROP',
+          imageTransform: [[1, 0, 0], [0, 1, 0]],
+          imageHash: image.hash,
+          visible: true
+        };
+      } else if (sameSize) {
+        // 尺寸没变：PS 里只调色/修图，保留原 fill 设置，画布上的裁切/位置完全不变
+        fills[index] = { ...fills[index], imageHash: image.hash, visible: true };
+      } else {
+        // 尺寸变了：PS 里裁过图，新旧图坐标系对不上，用 FILL + identity 保证不错位
+        fills[index] = {
+          ...fills[index],
+          type: 'IMAGE',
+          scaleMode: 'FILL',
+          imageTransform: [[1, 0, 0], [0, 1, 0]],
+          imageHash: image.hash,
+          visible: true
+        };
+      }
     } else {
       fills.push({
         type: 'IMAGE',
