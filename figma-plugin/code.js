@@ -42,6 +42,9 @@ figma.ui.onmessage = async (msg) => {
         return await sendThumbnail(msg.jobId, msg.targetId);
       case 'ui-resize':
         return resizeUi(!!msg.minimized);
+      case 'downscale-result':
+        resolveDownscale(msg.key, msg.data);
+        return;
       default:
         return;
     }
@@ -54,6 +57,55 @@ figma.ui.onmessage = async (msg) => {
 
 function errorText(err) {
   return String(err && err.message ? err.message : err);
+}
+
+// ---------------- 超大图自动缩放（Figma 单图单边上限 4096） ----------------
+
+const downscaleWaiters = {};
+let downscaleSeq = 0;
+
+function resolveDownscale(key, data) {
+  const hit = downscaleWaiters[key];
+  if (!hit) return;
+  delete downscaleWaiters[key];
+  hit(data);
+}
+
+/** 让 UI iframe 用 canvas 把过大的图缩到 maxSide 以内，返回新的 base64；失败返回空 */
+function requestDownscale(b64, maxSide) {
+  return new Promise((resolve) => {
+    const key = 'ds' + (++downscaleSeq);
+    let done = false;
+    downscaleWaiters[key] = (data) => {
+      if (done) return;
+      done = true;
+      resolve(data || '');
+    };
+    figma.ui.postMessage({ type: 'downscale', key: key, data: b64, maxSide: maxSide });
+    setTimeout(() => {
+      if (done) return;
+      if (downscaleWaiters[key]) delete downscaleWaiters[key];
+      done = true;
+      resolve('');
+    }, 30000);
+  });
+}
+
+/** createImage，遇到单边超限时自动缩小一次再重试 */
+async function createImageSafe(b64) {
+  try {
+    return figma.createImage(figma.base64Decode(b64));
+  } catch (err) {
+    if (!/too large/i.test(errorText(err))) throw err;
+    const smaller = await requestDownscale(b64, 4096);
+    if (!smaller) throw new Error('图片超过 Figma 单边 4096px 上限，缩放后仍无法写入');
+    return figma.createImage(figma.base64Decode(smaller));
+  }
+}
+
+// 这些错误重试多少次都不会好：图层没了 / 节点类型不对 / 图太大 / 任务失效
+function isPermanentApplyError(text) {
+  return /原图层已不存在|原节点没有 fills|原节点找不到图片填充|任务已失效|too large/i.test(text);
 }
 
 // 最小化：缩成一条不挡画布的小横条；监听在 iframe 里照常跑
@@ -341,9 +393,11 @@ async function buildPayload(node, found, cropMode, newLayerMode) {
     }
 
     const MAX_PIXELS = 8 * 1024 * 1024;
+    const MAX_SIDE = 4096; // Figma 单张图片单边上限，超了 createImage 会报 "Image is too large"
     const maxScaleByRes = Math.max(refOrigW / nodeW, refOrigH / nodeH, 1);
     const maxScaleByPixels = Math.sqrt(MAX_PIXELS / (nodeW * nodeH));
-    const scale = Math.min(maxScaleByRes, maxScaleByPixels, 50);
+    const maxScaleBySide = MAX_SIDE / Math.max(nodeW, nodeH);
+    const scale = Math.min(maxScaleByRes, maxScaleByPixels, maxScaleBySide, 50);
     const rendered = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
 
     // 判断是多图层合成（容器含多个IMAGE子节点）还是单节点
@@ -482,7 +536,14 @@ async function runApplyResult(msg) {
     figma.ui.postMessage({ type: 'apply-done', jobId: jobId, ok: true });
   } catch (err) {
     const text = errorText(err);
-    figma.ui.postMessage({ type: 'apply-done', jobId: jobId, ok: false, error: text });
+    // permanent=true：重试也不会好（图层被删、图太大等），UI 那边只提示一次就停手
+    figma.ui.postMessage({
+      type: 'apply-done',
+      jobId: jobId,
+      ok: false,
+      error: text,
+      permanent: isPermanentApplyError(text)
+    });
     figma.notify('回写失败：' + text, { error: true, timeout: 6000 });
   }
 }
@@ -492,7 +553,7 @@ async function applyResult(msg) {
   const data = msg && msg.data;
   if (!data) throw new Error('回传数据为空');
 
-  const image = figma.createImage(figma.base64Decode(data));
+  const image = await createImageSafe(data);
   const target = meta.targetId ? await figma.getNodeByIdAsync(meta.targetId) : null;
 
   // 新建模式：crop 回传不替换原 fill，而是隐藏原 fill + 新建画框装 PS 结果

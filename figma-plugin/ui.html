@@ -597,6 +597,36 @@
 
   // ---------------- 注册表 ----------------
 
+  /** 主线程遇到 Figma 单图单边超限时，让我们把图缩到 maxSide 以内再回传 base64 */
+  function handleDownscale(msg) {
+    var b64 = msg.data || '';
+    var maxSide = Number(msg.maxSide) || 4096;
+    function reply(value) {
+      parent.postMessage({ pluginMessage: { type: 'downscale-result', key: msg.key, data: value || '' } }, '*');
+    }
+    try {
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var scale = Math.min(maxSide / (img.width || 1), maxSide / (img.height || 1), 1);
+          var w = Math.max(1, Math.round((img.width || 1) * scale));
+          var h = Math.max(1, Math.round((img.height || 1) * scale));
+          var canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          reply(canvas.toDataURL('image/png').replace(/^data:image\/\w+;base64,/, ''));
+        } catch (e) {
+          reply('');
+        }
+      };
+      img.onerror = function () { reply(''); };
+      img.src = 'data:image/png;base64,' + b64;
+    } catch (e) {
+      reply('');
+    }
+  }
+
   function normalizeValue(value) {
     var jobs = [];
     var seen = {};
@@ -611,6 +641,7 @@
         at: Number(raw.at) || 0,
         appliedAt: Number(raw.appliedAt) || 0,
         state: JOB_STATES.indexOf(raw.state) >= 0 ? raw.state : 'watching',
+        blockedAt: Number(raw.blockedAt) || 0,
         thumb: typeof raw.thumb === 'string' ? raw.thumb : ''
       });
     }
@@ -1082,7 +1113,7 @@
     var updatedAt = Number(remote.updatedAt) || 0;
 
     if (remote.status === 'ready') {
-      if (updatedAt > (entry.appliedAt || 0)) {
+      if (updatedAt > (entry.appliedAt || 0) && updatedAt > (entry.blockedAt || 0)) {
         // 来了比已贴版本更新的结果：不管之前是正常等待、还是被 PS 取消/失败过，
         // 都重置熔断计数并恢复监听 —— 「取消」只该停 PS 那边的会话，不是永久拒收
         if (entry.state === 'failed') {
@@ -1219,9 +1250,26 @@
           return;
         }
         applyFailures[jobId] = (applyFailures[jobId] || 0) + 1;
+        if (reply.permanent) {
+          // 图层被删、图太大这类错误重试也不会好：只提示一次，之后同一版结果不再尝试
+          entry.state = 'failed';
+          entry.blockedAt = updatedAt || 0;
+          delete uiStatus[jobId];
+          delete applyFailures[jobId];
+          cancelRetry(jobId);
+          saveRegistry();
+          renderList();
+          log(
+            '任务 ' + jobId + ' 写回失败，已停止自动重试：' + reason +
+              '（PS 里再传一次新结果会自动重试；原图层删掉了就取消这个任务）',
+            true
+          );
+          return;
+        }
         if (applyFailures[jobId] >= MAX_APPLY_FAILURES) {
           // 同一条不可修复的错误（例如 fallback 的容器拒绝 appendChild）不再无限退避（D4）
           entry.state = 'failed';
+          entry.blockedAt = updatedAt || 0; // 这一版结果不再自动重试，等 PS 传新结果
           delete uiStatus[jobId];
           cancelRetry(jobId);
           saveRegistry();
@@ -1350,6 +1398,7 @@
       // done 现在默认就在监听，只有被停止/失败/过期的才需要恢复
       if (!isListening(entry)) {
         entry.state = 'watching';
+        entry.blockedAt = 0; // 手动恢复 = 明确要求再试一次
         delete uiStatus[entry.jobId];
         delete lastFailure[entry.jobId];
         delete applyFailures[entry.jobId];
@@ -1458,9 +1507,14 @@
       var waiting = pendingApply[msg.jobId];
       if (waiting) {
         delete pendingApply[msg.jobId];
-        waiting.resolve({ ok: !!msg.ok, error: msg.error || '' });
+        waiting.resolve({ ok: !!msg.ok, error: msg.error || '', permanent: !!msg.permanent });
       }
-      if (!msg.ok) log('写回失败：' + (msg.error || '未知原因'), true);
+      if (!msg.ok && !msg.permanent) log('写回失败：' + (msg.error || '未知原因'), true);
+      return;
+    }
+
+    if (msg.type === 'downscale') {
+      handleDownscale(msg);
       return;
     }
 
