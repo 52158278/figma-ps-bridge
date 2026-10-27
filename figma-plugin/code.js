@@ -26,7 +26,7 @@ figma.ui.onmessage = async (msg) => {
     if (!msg || !msg.type) return;
     switch (msg.type) {
       case 'send-request':
-        return await handleSendRequest(!!msg.cropMode);
+        return await handleSendRequest(!!msg.cropMode, !!msg.newLayerMode);
       case 'apply-result':
         // 串行执行：多个 job 同时回传时按顺序写画布，避免 fills 互相覆盖
         return enqueueApply(() => runApplyResult(msg));
@@ -340,7 +340,7 @@ function computeCropRect(transform, nodeW, nodeH, origW, origH) {
  *  - 裁剪模式 + 有图片填充：getImageByHash 拿原图，算出 Figma 显示的裁剪矩形，
  *    把原图+裁剪元数据交给 UI iframe 用 canvas 在原始分辨率下裁出那块
  *  - 没图片填充：退化为 node.exportAsync 渲染 */
-async function buildPayload(node, found, cropMode) {
+async function buildPayload(node, found, cropMode, newLayerMode) {
   if (found) {
     const image = figma.getImageByHash(found.paint.imageHash);
     if (!image) throw new Error('图片原始数据不可用（可能来自团队库或已失效）');
@@ -373,10 +373,11 @@ async function buildPayload(node, found, cropMode) {
         meta: {
           targetId: found.owner.id, targetName: found.owner.name, nodeName: node.name,
           nodeWidth: nodeW, nodeHeight: nodeH,
-          imageWidth: rect.w, imageHeight: rect.h, // 这就是裁剪后要回写的尺寸
+          imageWidth: rect.w, imageHeight: rect.h,
           originalWidth: size.width, originalHeight: size.height,
           cropX: rect.x, cropY: rect.y, cropW: rect.w, cropH: rect.h,
-          paintIndex: found.index, mode: 'crop', fallback: false
+          paintIndex: found.index, mode: 'crop', fallback: false,
+          newLayer: !!newLayerMode
         },
         // 发原始图 bytes；UI iframe 看到 mode='crop' 会按 cropX/Y/W/H 用 canvas 裁出那块再上传
         data: figma.base64Encode(bytes)
@@ -412,7 +413,7 @@ async function buildPayload(node, found, cropMode) {
 }
 
 /** 遍历选中全部节点；已在处理中的 targetId 跳过；单节点失败不影响其它节点 */
-async function handleSendRequest(cropMode = false) {
+async function handleSendRequest(cropMode = false, newLayerMode = false) {
   const items = [];
   const problems = [];
   try {
@@ -436,7 +437,7 @@ async function handleSendRequest(cropMode = false) {
         continue;
       }
       try {
-        const payload = await buildPayload(node, found, cropMode);
+        const payload = await buildPayload(node, found, cropMode, newLayerMode);
         items.push(payload);
         busyTargets[payload.meta.targetId] = true;
       } catch (err) {
@@ -495,6 +496,13 @@ async function applyResult(msg) {
 
   const image = figma.createImage(figma.base64Decode(data));
   const target = meta.targetId ? await figma.getNodeByIdAsync(meta.targetId) : null;
+
+  // 新建模式：crop 回传不替换原 fill，而是隐藏原 fill + 新建画框装 PS 结果
+  // 同任务第二次回传 → 找到上次新建的矩形直接换 imageHash（不新建画框）
+  if (meta.mode === 'crop' && meta.newLayer) {
+    await applyResultNewLayer(msg, meta, image, target);
+    return;
+  }
 
   if (!meta.fallback && target && 'fills' in target && Array.isArray(target.fills)) {
     const fills = target.fills.slice();
@@ -558,6 +566,89 @@ async function applyResult(msg) {
   }
 
   await createFallbackLayer(msg, meta, image, target);
+}
+
+/** 新建模式：crop 回传时隐藏原 fill（完整原图保留不丢）+ 新建画框装 PS 结果。
+ *  同任务第二次回传 → 找到上次新建的 RECTANGLE 直接换 imageHash，不重复建画框。
+ *  targetId 始终指向原图层 — 新建模式不改动 targetId，fallback 才改。 */
+async function applyResultNewLayer(msg, meta, image, target) {
+  if (!target) throw new Error('原图层已不存在');
+  if (!('fills' in target) || !Array.isArray(target.fills)) throw new Error('原节点没有 fills，无法新建');
+
+  // --- 先找 paintIndex，后面要用到 ---
+  const fills = target.fills.slice();
+  let index = typeof meta.paintIndex === 'number' ? meta.paintIndex : -1;
+  if (index < 0 || !fills[index] || fills[index].type !== 'IMAGE') {
+    index = fills.findIndex((f) => f.type === 'IMAGE');
+  }
+  if (index < 0) throw new Error('原节点找不到图片填充');
+
+  // --- 同任务第二次回传：找上次新建的 RECTANGLE，直接换 imageHash ---
+  if (meta.resultLayerId) {
+    const existing = await figma.getNodeByIdAsync(meta.resultLayerId);
+    if (existing && existing.type === 'RECTANGLE' && 'fills' in existing) {
+      existing.fills = [{ type: 'IMAGE', scaleMode: 'CROP', imageHash: image.hash }];
+      figma.notify('已更新新建图层的 PS 结果「' + target.name + '」', { timeout: 3000 });
+      return;
+    }
+    // RECTANGLE 被用户删了 → 走第一次新建流程（resultLayerId 会被覆盖更新）
+  }
+
+  // --- 第一次新建 ---
+  // 1) 隐藏原 fill（完整原图还在里面，visible=false 不丢）
+  fills[index] = { ...fills[index], visible: false };
+  target.fills = fills;
+
+  // 2) 切到原图层所在页面（figma.group 会把 target 移进去，不切页新画框可能跑到别的页面）
+  const page = pageOf(target);
+  if (page && page.id !== figma.currentPage.id) {
+    await figma.setCurrentPageAsync(page);
+  }
+
+  const container = containerFor(target);
+  const box = target.absoluteBoundingBox;
+
+  // 3) figma.group 把 target（已隐藏 fill）移进新 group，group 追加到原容器
+  // figma.group 会自动把 group 原点放在传入节点 bounding box 的左上角，
+  // 所以 target 在 group 里会自动对齐到 (0,0) —— 正好和新建的 RECTANGLE 叠一起
+  const group = figma.group([target], container.node);
+  group.name = 'PS 结果_' + (meta.targetName || target.name);
+
+  // 4) auto-layout 容器里 group 默认会被当作 item 排到末尾 → 强制绝对定位并还原原位置
+  if ('layoutMode' in container.node && container.node.layoutMode && container.node.layoutMode !== 'NONE') {
+    try { group.layoutPositioning = 'ABSOLUTE'; } catch (err) { /* 老 API 忽略 */ }
+  }
+  if (box) {
+    group.x = box.x - container.originX;
+    group.y = box.y - container.originY;
+  }
+
+  // 5) 新建 RECTANGLE 放进 group，和 target 叠一起（都是 0,0）
+  const rect = figma.createRectangle();
+  rect.name = (meta.targetName || target.name) + ' (PS)';
+  rect.resize(
+    Math.max(1, Math.round(meta.nodeWidth || target.width)),
+    Math.max(1, Math.round(meta.nodeHeight || target.height))
+  );
+  rect.fills = [{ type: 'IMAGE', scaleMode: 'CROP', imageHash: image.hash }];
+  rect.x = 0;
+  rect.y = 0;
+  group.appendChild(rect);
+
+  // 6) 定位 + 通知
+  try {
+    await ensureVisible(group);
+  } catch (err) { /* 忽略 */ }
+  figma.notify('新建模式：已回写并隐藏原图层「' + target.name + '」', { timeout: 4000 });
+
+  // 告诉 UI：记下这次新建的 groupId/layerId，下次同任务回传直接更新
+  // 注意不发 fallback-created（它会改 targetId），新建模式 targetId 保持原图层
+  figma.ui.postMessage({
+    type: 'newlayer-created',
+    jobId: msg.jobId || '',
+    groupId: group.id,
+    layerId: rect.id
+  });
 }
 
 /** 目标装不了填充：在目标所在页面新建一个矩形，位置用页面绝对坐标 */

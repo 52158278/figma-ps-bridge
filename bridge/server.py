@@ -800,6 +800,24 @@ class Handler(BaseHTTPRequestHandler):
         if action == "touch" and method == "POST":
             return self.send_json(200, touch_job(job))
 
+        if action == "meta" and method == "POST":
+            # 合并客户端发回来的 meta 字段（如 resultLayerId），保存后下次回传带过来
+            raw = self.read_body().decode("utf-8", "replace")
+            updates = {}
+            if raw.strip():
+                try:
+                    updates = json.loads(raw)
+                except ValueError:
+                    raise HttpError(400, "meta 不是合法 JSON")
+            if not isinstance(updates, dict):
+                raise HttpError(400, "meta 必须是对象")
+            with JOBS_LOCK:
+                merged = dict(job.get("meta") if isinstance(job.get("meta"), dict) else {})
+                merged.update(updates)
+                job["meta"] = merged
+                save_jobs_locked()
+            return self.send_json(200, public_job(job))
+
         if action == "result":
             if method == "PUT":
                 body = self.read_body()

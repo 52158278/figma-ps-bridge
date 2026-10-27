@@ -203,7 +203,8 @@
 
   <div class="cropbar">
     <label><input type="checkbox" id="cropMode"> 裁剪模式</label>
-    <span class="note" id="cropNote">发送 Figma 里看到的样子（含裁切），不是完整原图</span>
+    <label><input type="checkbox" id="newLayerMode"> 新建图层</label>
+    <span class="note" id="cropNote">裁剪模式：发送 Figma 可见的原图裁剪区域</span>
   </div>
 
   <div class="actions">
@@ -246,6 +247,7 @@
   var minToggle = document.getElementById('minToggle');
   var miniState = document.getElementById('miniState');
   var cropModeEl = document.getElementById('cropMode');
+  var newLayerModeEl = document.getElementById('newLayerMode');
 
   var selection = { count: 0, name: '' };
   // 与 bridge/server.py、ps-cep/js/main.js 保持一致
@@ -293,6 +295,11 @@
   cropModeEl.checked = store.get('ps-bridge-crop-mode') === '1';
   cropModeEl.addEventListener('change', function () {
     store.set('ps-bridge-crop-mode', cropModeEl.checked ? '1' : '0');
+  });
+  // 新建模式：回传时新建画框容纳 PS 结果，原图层隐藏不丢；每次发送时决定
+  newLayerModeEl.checked = store.get('ps-bridge-new-layer') === '1';
+  newLayerModeEl.addEventListener('change', function () {
+    store.set('ps-bridge-new-layer', newLayerModeEl.checked ? '1' : '0');
   });
 
   // ---------------- 面板折叠（顶部信息 / 运行日志） ----------------
@@ -1445,7 +1452,7 @@
     sending = true;
     renderSendButton();
     log('正在读取选中图层的源图…');
-    parent.postMessage({ pluginMessage: { type: 'send-request', cropMode: cropModeEl.checked } }, '*');
+    parent.postMessage({ pluginMessage: { type: 'send-request', cropMode: cropModeEl.checked, newLayerMode: newLayerModeEl.checked } }, '*');
   });
 
   resumeBtn.addEventListener('click', resumeAll);
@@ -1524,6 +1531,28 @@
         saveRegistry();
         renderList();
         log('记下新图层「' + msg.name + '」，下次回传会覆盖它');
+      }
+      return;
+    }
+
+    if (msg.type === 'newlayer-created') {
+      var jobEntry = findJob(msg.jobId);
+      if (jobEntry) {
+        jobEntry.meta = jobEntry.meta || {};
+        jobEntry.meta.resultLayerId = msg.layerId;
+        jobEntry.meta.resultGroupId = msg.groupId;
+        saveRegistry();
+        renderList();
+        log('新建模式已创建画框，记下新图层供下次回传更新（原图层保留且隐藏）');
+        // 同时更新后端 meta，让协调器自动回传时也能找到已创建的图层
+        ensureBase().then(function (base) {
+          if (!base) return;
+          fetch(base + '/api/jobs/' + msg.jobId + '/meta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ resultLayerId: msg.layerId, resultGroupId: msg.groupId })
+          }).catch(function () {});
+        });
       }
       return;
     }
