@@ -1049,6 +1049,19 @@
         }
       }
     })();
+
+    // PS 单方面发来的图：单独轮询（主循环的长轮询会挂 25 秒，发现太慢）
+    (async function discoverLoop() {
+      while (true) {
+        try {
+          var base = activeBase || (await ensureBase());
+          if (base) await discoverPsJobs(base);
+        } catch (err) {
+          // 忽略，下一轮再试
+        }
+        await sleep(3000);
+      }
+    })();
   }
 
   async function coordinatorStep() {
@@ -1210,6 +1223,110 @@
         }
       }, '*');
     });
+  }
+
+  /** PS 主动发来的图：主线程在选中图层上方新建一个图层 */
+  function sendInsert(jobId, meta, buffer) {
+    return new Promise(function (resolve) {
+      var settled = false;
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        delete pendingApply[jobId];
+        resolve({ ok: false, error: '主线程新建图层超时' });
+      }, 60000);
+      pendingApply[jobId] = {
+        resolve: function (result) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          delete pendingApply[jobId];
+          resolve(result);
+        }
+      };
+      parent.postMessage({
+        pluginMessage: {
+          type: 'insert-result',
+          jobId: jobId,
+          meta: { name: meta.name || meta.targetName || 'PS 图片' },
+          data: bytesToB64(new Uint8Array(buffer))
+        }
+      }, '*');
+    });
+  }
+
+  // ---------------- PS 主动发来的图：发现 + 新建图层 ----------------
+
+  var inserting = false;
+  // PS 单方面发来的图多久还算「有效」（插件重开时不贴陈年老图）
+  var PS_INSERT_MAX_AGE_MS = 10 * 60 * 1000;
+
+  /**
+   * PS 面板可以「单方面」把一张自己打开的图发到桥接服务（meta.source='ps'）。
+   * 这类任务不在本地注册表里，所以单独扫一遍：ready 且没处理过的就新建一个图层。
+   */
+  async function discoverPsJobs(base) {
+    if (inserting) return;
+    inserting = true;
+    try {
+      var res = await fetch(base + '/api/jobs', { cache: 'no-store' });
+      if (!res.ok) return;
+      var data = await res.json();
+      var list = (data && data.jobs) || [];
+      for (var i = 0; i < list.length; i++) {
+        var job = list[i];
+        if (!job || !job.meta || job.meta.source !== 'ps') continue;
+        if (job.status !== 'ready') continue;
+        if (findJob(job.id)) continue;
+        // 只接刚发来的：插件重开时不要把很久以前的图悄悄贴进画布
+        if (Date.now() - (Number(job.createdAt) || 0) > PS_INSERT_MAX_AGE_MS) continue;
+        await insertOne(base, job);
+      }
+    } catch (err) {
+      // 网络抖动忽略，下一轮再扫
+    } finally {
+      inserting = false;
+    }
+  }
+
+  async function insertOne(base, job) {
+    var updatedAt = Number(job.updatedAt) || 0;
+    var rr;
+    try {
+      rr = await fetch(base + '/api/jobs/' + job.id + '/result', { cache: 'no-store' });
+    } catch (err) {
+      return;
+    }
+    if (!rr.ok) return;
+    var buf = await rr.arrayBuffer();
+    var reply = await sendInsert(job.id, job.meta || {}, buf);
+
+    if (!reply.ok) {
+      log('PS 主动发来的「' + (job.meta.name || '图片') + '」新建失败：' + (reply.error || '未知原因'), true);
+      // 标记失败，免得每轮都重试
+      fetch(base + '/api/jobs/' + job.id + '/fail', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: 'Figma 端新建图层失败：' + (reply.error || '未知原因') })
+      }).catch(function () {});
+      return;
+    }
+
+    // 登记进注册表：用户能在列表里看到这条，但不再监听（已经贴完了）
+    registry.jobs.push({
+      jobId: job.id,
+      meta: Object.assign({}, job.meta, { mode: 'insert', nodeName: job.meta.name || 'PS 图片' }),
+      at: Number(job.createdAt) || Date.now(),
+      appliedAt: updatedAt,
+      state: 'done',
+      blockedAt: 0,
+      thumb: 'none'
+    });
+    saveRegistry();
+    renderList();
+    log('已按 PS 发来的「' + (job.meta.name || '图片') + '」新建图层（' +
+      (job.meta.imageWidth || '?') + '×' + (job.meta.imageHeight || '?') + '）');
+    await ackResult(base, job.id, updatedAt);
   }
 
   async function attemptApply(base, jobId, updatedAt) {

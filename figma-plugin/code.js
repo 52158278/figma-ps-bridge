@@ -30,6 +30,9 @@ figma.ui.onmessage = async (msg) => {
       case 'apply-result':
         // 串行执行：多个 job 同时回传时按顺序写画布，避免 fills 互相覆盖
         return enqueueApply(() => runApplyResult(msg));
+      case 'insert-result':
+        // PS 自己打开的图（Figma 没有对应任务）：在选中图层上方新建一个图层
+        return enqueueApply(() => runInsertResult(msg));
       case 'request-selection':
         return pushSelection();
       case 'find-target':
@@ -545,6 +548,69 @@ async function runApplyResult(msg) {
       permanent: isPermanentApplyError(text)
     });
     figma.notify('回写失败：' + text, { error: true, timeout: 6000 });
+  }
+}
+
+// ---------------- PS 主动发来的图（Figma 里没有对应任务） ----------------
+
+/** 在选中图层上方新建一个图层，尺寸 = PS 导出的像素尺寸（不缩放） */
+async function runInsertResult(msg) {
+  const jobId = msg && msg.jobId ? String(msg.jobId) : '';
+  try {
+    if (!jobId) throw new Error('任务已失效');
+    const data = msg && msg.data;
+    if (!data) throw new Error('回传数据为空');
+    const meta = msg && msg.meta ? msg.meta : {};
+
+    const image = await createImageSafe(data);
+    const size = await image.getSizeAsync();
+    const w = Math.max(1, Math.round(size.width));
+    const h = Math.max(1, Math.round(size.height));
+
+    const anchor = figma.currentPage.selection && figma.currentPage.selection[0];
+    const rect = figma.createRectangle();
+    rect.name = meta.name || 'PS 图片';
+    rect.resize(w, h);
+    rect.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageTransform: [[1, 0, 0], [0, 1, 0]], imageHash: image.hash }];
+
+    if (anchor && anchor.parent) {
+      // 紧贴在选中图层之上（图层顺序），并和它左上角对齐
+      const parent = anchor.parent;
+      const index = parent.children.indexOf(anchor);
+      if (index >= 0) parent.insertChild(index + 1, rect);
+      else parent.appendChild(rect);
+      if ('layoutMode' in parent && parent.layoutMode && parent.layoutMode !== 'NONE') {
+        // auto-layout 容器会重排，改成绝对定位才允许自由摆放
+        rect.layoutPositioning = 'ABSOLUTE';
+      }
+      const anchorBox = anchor.absoluteBoundingBox;
+      const parentBox = parent.type === 'PAGE' ? { x: 0, y: 0 } : parent.absoluteBoundingBox;
+      if (anchorBox && parentBox) {
+        rect.x = anchorBox.x - parentBox.x;
+        rect.y = anchorBox.y - parentBox.y;
+      }
+    } else {
+      // 没选中任何东西：放在视口中心
+      const center = figma.viewport.center;
+      rect.x = center.x - w / 2;
+      rect.y = center.y - h / 2;
+      figma.currentPage.appendChild(rect);
+    }
+
+    figma.currentPage.selection = [rect];
+    figma.viewport.scrollAndZoomIntoView([rect]);
+    figma.notify('已新建图层「' + rect.name + '」（' + w + '×' + h + '）', { timeout: 4000 });
+    figma.ui.postMessage({ type: 'apply-done', jobId: jobId, ok: true, inserted: rect.id });
+  } catch (err) {
+    const text = errorText(err);
+    figma.ui.postMessage({
+      type: 'apply-done',
+      jobId: jobId,
+      ok: false,
+      error: text,
+      permanent: isPermanentApplyError(text)
+    });
+    figma.notify('新建图层失败：' + text, { error: true, timeout: 6000 });
   }
 }
 

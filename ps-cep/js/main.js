@@ -1091,6 +1091,67 @@ async function sendSession(session) {
   }
 }
 
+/**
+ * PS 单方面打开了一张图（没有任务标记）：导出 PNG 后在 Figma 里新建一个图层。
+ * POST /api/jobs {source:'ps', mode:'insert'} → PUT result → Figma 端轮询发现后插入
+ * （选中了图层就插在它正上方，尺寸等于图片像素尺寸）。
+ */
+async function sendAsInsert(doc) {
+  if (!doc || !doc.docId) throw new Error('没有可用的活动文档');
+
+  const outPath = path.join(os.tmpdir(), 'ps-insert-' + Date.now() + '.png');
+  try {
+    setStatus('导出 PNG（' + shortName(doc.docName || '当前文档') + '）…');
+    const size = await withHost(function () {
+      return hostSavePng(outPath, doc.docId);
+    });
+
+    const buffer = fs.readFileSync(outPath);
+    if (!buffer || !buffer.length) throw new Error('导出的图片为空');
+
+    const wh = /^(\d+)\s*[xX×]\s*(\d+)$/.exec(String(size || '').trim());
+    const imageWidth = wh ? Number(wh[1]) : 0;
+    const imageHeight = wh ? Number(wh[2]) : 0;
+
+    setStatus('发到 Figma（会在选中图层上方新建）…');
+    let created;
+    try {
+      created = await postJson('/api/jobs', {
+        source: 'ps',
+        mode: 'insert',
+        client: 'ps',
+        name: doc.docName || 'PS 图片',
+        docName: doc.docName || '',
+        imageWidth: imageWidth,
+        imageHeight: imageHeight
+      });
+    } catch (err) {
+      throw new Error('创建发图任务失败：' + errMsg(err));
+    }
+    const jobId = created && created.id;
+    if (!jobId) throw new Error('桥接服务没有返回任务 id');
+
+    try {
+      await request('PUT', '/api/jobs/' + jobId + '/result', buffer, 'image/png', HTTP_UPLOAD_TIMEOUT_MS);
+    } catch (err) {
+      throw new Error('图片上传失败：' + errMsg(err));
+    }
+
+    log('已发到 Figma：' + shortName(doc.docName || '图片') + '（' +
+      (imageWidth || '?') + '×' + (imageHeight || '?') + '，' +
+      Math.round(buffer.length / 1024) + ' KB）· 会在 Figma 选中图层上方新建');
+    setStatus('已发到 Figma · 会在选中图层上方新建');
+    confirmApplied(jobId, 'Figma 已新建图层').catch(function () {});
+    return true;
+  } finally {
+    try {
+      if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+    } catch (_) {
+      /* 删除失败不影响主流程 */
+    }
+  }
+}
+
 // 回传后等 Figma 贴回的确认窗口与轮询间隔
 const APPLY_CONFIRM_MS = 14000;
 const APPLY_CONFIRM_POLL_MS = 2000;
@@ -1099,7 +1160,7 @@ const APPLY_CONFIRM_POLL_MS = 2000;
  * 回传后确认 Figma 端有没有真的贴回（桥接端收到 ack 后 status 才变 done）。
  * 只写日志、不改会话状态：确认不了也不影响回传本身。
  */
-async function confirmApplied(jobId) {
+async function confirmApplied(jobId, doneText) {
   const deadline = Date.now() + APPLY_CONFIRM_MS;
   while (Date.now() < deadline) {
     await new Promise(function (resolve) { setTimeout(resolve, APPLY_CONFIRM_POLL_MS); });
@@ -1115,7 +1176,7 @@ async function confirmApplied(jobId) {
     }
     if (!job) continue;
     if (job.status === 'done') {
-      log('任务 #' + jobId + '：Figma 已贴回原图层');
+      log('任务 #' + jobId + '：' + (doneText || 'Figma 已贴回原图层'));
       return;
     }
     if (job.status === 'failed') {
@@ -1145,7 +1206,10 @@ async function saveActive() {
     activeDoc = info.doc;
 
     if (!info.jobId) {
-      throw new Error('当前文档不是从 Figma 发来的（没有任务标记），无法回传');
+      // 不是从 Figma 发来的：PS 自己打开了一张图 → 发到 Figma 新建一个图层
+      setStatus('发到 Figma「' + shortName(info.doc.docName || '当前文档') + '」…');
+      await sendAsInsert(info.doc);
+      return;
     }
 
     target = await ensureSession(info.jobId, info.doc.docId, info.doc.docName);

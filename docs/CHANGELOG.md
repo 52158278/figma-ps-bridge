@@ -2,6 +2,29 @@
 
 版本口径：桥接服务、Figma 插件、PS 面板按同一项目版本发布；跨端契约见 [multi-doc-spec.md](multi-doc-spec.md)。
 
+## 0.3.4 — PS 单方面发图：Figma 里直接新建图层
+
+**需求**：PS 自己打开一张图（不是从 Figma 发来的，文档里没有任务标记），点「保存并回传」时原来会报错拒绝。现在希望它能把这张图发到 Figma，并在选中图层上方新建一个图层，尺寸与 PS 中一致。
+
+**做法**（三端联动，桥接服务不用改）：
+
+- PS 面板 `saveActive()`：没有任务标记时不再抛错，改走 `sendAsInsert()` —— 按 docId 导出 PNG → `POST /api/jobs {source:'ps', mode:'insert', name, imageWidth, imageHeight}` → `PUT result`
+- Figma 插件新增独立发现循环（3 秒一次，不跟 25 秒长轮询挤在一起）：`GET /api/jobs` 里挑 `meta.source==='ps' && status==='ready'` 且注册表没有的任务
+- 主线程新增 `insert-result`：`createImage` → 按图片像素尺寸 `resize` → 放到选中图层**正上方**（`parent.insertChild(index+1, ...)`，左上角与选中图层对齐；auto-layout 容器里自动改 `layoutPositioning='ABSOLUTE'`）；没选中就放到视口中心
+- 成功后写一条 `state:'done'` 记录到任务列表并 `ack`，PS 端能看到「Figma 已新建图层」
+- 只接受 10 分钟内发来的图（`PS_INSERT_MAX_AGE_MS`）：插件重开时不会把很久以前发的图悄悄贴进画布
+- 超大图沿用 0.3.3 的自动缩放（Figma 单图单边上限 4096px）
+
+### 验证
+
+- `node --check` 通过（`code.js`、`main.js`）；`ui.html` 内联脚本 `new Function` 校验通过
+
+### 升级
+
+**桥接服务本次没改，不用重启**；Figma 插件重新运行；PS 面板改动已同步到 CEP 目录，重启 Photoshop 生效。
+
+---
+
 ## 0.3.3 — 关掉未回传的图，任务不再赖在列表里
 
 **现象**：从 Figma 发一张图到 PS，PS 里什么都没做就把文档关掉，这张图的任务仍然一直留在 Figma 任务列表里。
