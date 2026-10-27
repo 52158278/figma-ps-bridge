@@ -304,91 +304,89 @@ function findImagePaint(node, depth = 0) {
   return null;
 }
 
-/** 根据 imageTransform 算出 Figma 在原图上实际显示的矩形（裁剪区域）
- *  imageTransform = [[a,b,tx],[c,d,ty]] 把图像像素点 (px,py) 映射到节点局部坐标 (nx,ny)
- *  节点显示区域是 [0, nodeW]×[0, nodeH]，所以逆变换节点四个角点回到图像空间，
- *  取其 bounding box 并 clamp 到 [0, origW]×[0, origH] 即可。
- *  变换不可逆（det ≈ 0）时返回 null，让调用方 fallback 到 render 路径 */
-function computeCropRect(transform, nodeW, nodeH, origW, origH) {
-  const m = transform || [[1, 0, 0], [0, 1, 0]];
-  const a = m[0][0], b = m[0][1], tx = m[0][2];
-  const c = m[1][0], d = m[1][1], ty = m[1][2];
-  const det = a * d - b * c;
-  if (Math.abs(det) < 1e-9) return null;
-  // 逆变换矩阵：把节点局部坐标 (nx,ny) 映射回图像像素坐标 (px,py)
-  const ia = d / det, ib = -b / det, itx = (b * ty - d * tx) / det;
-  const ic = -c / det, id_ = a / det, ity = (c * tx - a * ty) / det;
-  const corners = [
-    [0, 0], [nodeW, 0], [0, nodeH], [nodeW, nodeH]
-  ].map(([nx, ny]) => [ia * nx + ib * ny + itx, ic * nx + id_ * ny + ity]);
-
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const [px, py] of corners) {
-    if (px < minX) minX = px; if (px > maxX) maxX = px;
-    if (py < minY) minY = py; if (py > maxY) maxY = py;
-  }
-  minX = Math.max(0, minX); minY = Math.max(0, minY);
-  maxX = Math.min(origW, maxX); maxY = Math.min(origH, maxY);
-  const w = Math.round(maxX - minX);
-  const h = Math.round(maxY - minY);
-  if (w < 1 || h < 1) return null;
-  return { x: Math.round(minX), y: Math.round(minY), w, h };
-}
-
 /** 单个节点 → {meta, data}：
  *  - 非裁剪模式 + 有图片填充：getImageByHash 拿完整原图像素（保持原始分辨率）
- *  - 裁剪模式 + 有图片填充：getImageByHash 拿原图，算出 Figma 显示的裁剪矩形，
- *    把原图+裁剪元数据交给 UI iframe 用 canvas 在原始分辨率下裁出那块
+ *  - 裁剪模式：直接 exportAsync 以原始分辨率级别的 scale 渲染选中节点（CROP/合成效果已烘焙进去）
  *  - 没图片填充：退化为 node.exportAsync 渲染 */
 async function buildPayload(node, found, cropMode, newLayerMode) {
+  if (cropMode) {
+    // 裁剪模式（合成路径）：选中的可能是单个IMAGE节点，也可能是含多个IMAGE子图层的FRAME
+    // exportAsync 对 node 渲染会自动合成所有子图层，得到 Figma 里看到的样子
+    // scale 以选中 node 的尺寸为基准，保证输出像素数接近原始分辨率级别
+    const nodeW = Math.max(1, Math.round(node.width));
+    const nodeH = Math.max(1, Math.round(node.height));
+
+    // 找到 node 里最大的原始图尺寸作参考（用于估 scale）
+    let refOrigW = nodeW, refOrigH = nodeH;
+    const asyncSizes = [];
+    function collectImageSizes(n, depth = 0) {
+      if (depth > 4) return;
+      if ('fills' in n && Array.isArray(n.fills)) {
+        for (const f of n.fills) {
+          if (f.type === 'IMAGE' && f.visible !== false) {
+            try {
+              const img = figma.getImageByHash(f.imageHash);
+              if (img) asyncSizes.push(img.getSizeAsync().catch(() => null));
+            } catch (e) {}
+          }
+        }
+      }
+      if ('children' in n) for (const c of n.children) collectImageSizes(c, depth + 1);
+    }
+    collectImageSizes(node);
+    const sizes = await Promise.all(asyncSizes);
+    for (const s of sizes) {
+      if (s && s.width > refOrigW) refOrigW = s.width;
+      if (s && s.height > refOrigH) refOrigH = s.height;
+    }
+
+    const MAX_PIXELS = 8 * 1024 * 1024;
+    const maxScaleByRes = Math.max(refOrigW / nodeW, refOrigH / nodeH, 1);
+    const maxScaleByPixels = Math.sqrt(MAX_PIXELS / (nodeW * nodeH));
+    const scale = Math.min(maxScaleByRes, maxScaleByPixels, 50);
+    const rendered = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
+
+    // 判断是多图层合成（容器含多个IMAGE子节点）还是单节点
+    let multiImage = false;
+    if ('children' in node) {
+      let imageCount = 0;
+      function countImages(n, d = 0) {
+        if (d > 4) return;
+        if ('fills' in n && Array.isArray(n.fills)) {
+          for (const f of n.fills) if (f.type === 'IMAGE' && f.visible !== false) imageCount++;
+        }
+        if ('children' in n) for (const c of n.children) countImages(c, d + 1);
+      }
+      countImages(node);
+      multiImage = imageCount > 1;
+    }
+
+    return {
+      meta: {
+        targetId: node.id, targetName: node.name, nodeName: node.name,
+        nodeWidth: nodeW, nodeHeight: nodeH,
+        imageWidth: Math.round(nodeW * scale), imageHeight: Math.round(nodeH * scale),
+        mode: 'crop', fallback: false, newLayer: !!newLayerMode,
+        multiImage: multiImage
+      },
+      data: figma.base64Encode(rendered)
+    };
+  }
+
   if (found) {
     const image = figma.getImageByHash(found.paint.imageHash);
     if (!image) throw new Error('图片原始数据不可用（可能来自团队库或已失效）');
     const bytes = await image.getBytesAsync();
     if (!bytes || !bytes.length) throw new Error('读取原图失败');
     const size = await image.getSizeAsync();
-
-    // 裁剪模式：算出 Figma 画布上实际显示的那块矩形，发给 UI iframe 在原始分辨率下裁
-    if (cropMode) {
-      const nodeW = Math.max(1, Math.round(found.owner.width));
-      const nodeH = Math.max(1, Math.round(found.owner.height));
-      const rect = computeCropRect(found.paint.imageTransform, nodeW, nodeH, size.width, size.height);
-      if (!rect) {
-        // 极端情况（变换不可逆）→ fallback 到 render 路径，别让用户卡住
-        const longest = Math.max(node.width, node.height, 1);
-        const rawScale = Math.min(MAX_EXPORT_SCALE, Math.max(1, EXPORT_LONGEST / longest));
-        const scale = Math.floor(rawScale * 100) / 100;
-        const fallbackBytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: scale } });
-        return {
-          meta: {
-            targetId: found.owner.id, targetName: found.owner.name, nodeName: node.name,
-            nodeWidth: nodeW, nodeHeight: nodeH,
-            imageWidth: Math.round(node.width * scale), imageHeight: Math.round(node.height * scale),
-            paintIndex: found.index, mode: 'render', fallback: false, exportScale: scale
-          },
-          data: figma.base64Encode(fallbackBytes)
-        };
-      }
-      return {
-        meta: {
-          targetId: found.owner.id, targetName: found.owner.name, nodeName: node.name,
-          nodeWidth: nodeW, nodeHeight: nodeH,
-          imageWidth: rect.w, imageHeight: rect.h,
-          originalWidth: size.width, originalHeight: size.height,
-          cropX: rect.x, cropY: rect.y, cropW: rect.w, cropH: rect.h,
-          paintIndex: found.index, mode: 'crop', fallback: false,
-          newLayer: !!newLayerMode
-        },
-        // 发原始图 bytes；UI iframe 看到 mode='crop' 会按 cropX/Y/W/H 用 canvas 裁出那块再上传
-        data: figma.base64Encode(bytes)
-      };
-    }
+    const nodeW = Math.max(1, Math.round(found.owner.width));
+    const nodeH = Math.max(1, Math.round(found.owner.height));
 
     // 非裁剪模式：发完整原图
     return {
       meta: {
         targetId: found.owner.id, targetName: found.owner.name, nodeName: node.name,
-        nodeWidth: Math.round(found.owner.width), nodeHeight: Math.round(found.owner.height),
+        nodeWidth: nodeW, nodeHeight: nodeH,
         imageWidth: size.width, imageHeight: size.height,
         paintIndex: found.index, mode: 'origin', fallback: false
       },
@@ -518,14 +516,12 @@ async function applyResult(msg) {
 
       if (meta.mode === 'crop') {
         // 裁剪模式：发出去的已经是「Figma 可见部分」的原始分辨率裁块。
-        // 旧 fill 的 scaleMode/imageTransform 是为完整原图设计的，套在裁块上会指错坐标。
-        // 所以一律用 CROP + identity：让这张裁块直接填满节点显示区域即可。
-        // 若 PS 里没改尺寸（常见），CROP + identity 刚好 1:1 对齐；
-        // 若 PS 改了尺寸，CROP 保证不变形（可能裁掉 PS 加的边），FILL 才会拉伸。
+        // PS 回传的是高分辨率内容（可能被 PPI 变化微调过），用 FILL + identity
+        // 让它等比缩放到填满节点即可。FILL 会等比缩放，不变形；identity 保证不偏移。
         fills[index] = {
           ...fills[index],
           type: 'IMAGE',
-          scaleMode: 'CROP',
+          scaleMode: 'FILL',
           imageTransform: [[1, 0, 0], [0, 1, 0]],
           imageHash: image.hash,
           visible: true
@@ -573,9 +569,67 @@ async function applyResult(msg) {
  *  targetId 始终指向原图层 — 新建模式不改动 targetId，fallback 才改。 */
 async function applyResultNewLayer(msg, meta, image, target) {
   if (!target) throw new Error('原图层已不存在');
+
+  // --- 同任务第二次回传：找上次新建的 RECTANGLE，直接换 imageHash ---
+  if (meta.resultLayerId) {
+    const existing = await figma.getNodeByIdAsync(meta.resultLayerId);
+    if (existing && existing.type === 'RECTANGLE' && 'fills' in existing) {
+      existing.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageTransform: [[1, 0, 0], [0, 1, 0]], imageHash: image.hash }];
+      figma.notify('已更新新建图层的 PS 结果「' + target.name + '」', { timeout: 3000 });
+      return;
+    }
+  }
+
+  // --- multiImage：target 是容器，里面有多个 IMAGE 子图层（如左中右三段拼的按钮）---
+  if (meta.multiImage && 'children' in target) {
+    // 1) 切到 target 所在页面
+    const page = pageOf(target);
+    if (page && page.id !== figma.currentPage.id) await figma.setCurrentPageAsync(page);
+
+    // 2) 找所有 IMAGE 子节点（递归）
+    const imageNodes = [];
+    function collectImages(n, d = 0) {
+      if (d > 4) return;
+      if ('fills' in n && Array.isArray(n.fills)) {
+        for (const f of n.fills) {
+          if (f.type === 'IMAGE' && f.visible !== false) { imageNodes.push(n); break; }
+        }
+      }
+      if ('children' in n) for (const c of n.children) collectImages(c, d + 1);
+    }
+    collectImages(target);
+
+    // 3) 用 figma.group 把它们打组 — group 会自动放在 target 内部
+    const group = figma.group(imageNodes, target);
+    group.name = '原图（隐藏）';
+    group.visible = false;
+
+    // 4) 新建 RECTANGLE 叠在 target 上
+    const rect = figma.createRectangle();
+    rect.name = (meta.targetName || target.name) + ' (PS)';
+    rect.resize(
+      Math.max(1, Math.round(meta.nodeWidth || target.width)),
+      Math.max(1, Math.round(meta.nodeHeight || target.height))
+    );
+    rect.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageTransform: [[1, 0, 0], [0, 1, 0]], imageHash: image.hash }];
+    rect.x = 0;
+    rect.y = 0;
+    target.appendChild(rect);
+
+    try { await ensureVisible(target); } catch (err) {}
+    figma.notify('新建模式（多图层）：已隐藏 ' + imageNodes.length + ' 个原图层，新建合成结果', { timeout: 4000 });
+    figma.ui.postMessage({
+      type: 'newlayer-created',
+      jobId: msg.jobId || '',
+      groupId: group.id,
+      layerId: rect.id
+    });
+    return;
+  }
+
+  // --- singleImage：target 是单个 IMAGE 节点 ---
   if (!('fills' in target) || !Array.isArray(target.fills)) throw new Error('原节点没有 fills，无法新建');
 
-  // --- 先找 paintIndex，后面要用到 ---
   const fills = target.fills.slice();
   let index = typeof meta.paintIndex === 'number' ? meta.paintIndex : -1;
   if (index < 0 || !fills[index] || fills[index].type !== 'IMAGE') {
@@ -583,70 +637,47 @@ async function applyResultNewLayer(msg, meta, image, target) {
   }
   if (index < 0) throw new Error('原节点找不到图片填充');
 
-  // --- 同任务第二次回传：找上次新建的 RECTANGLE，直接换 imageHash ---
-  if (meta.resultLayerId) {
-    const existing = await figma.getNodeByIdAsync(meta.resultLayerId);
-    if (existing && existing.type === 'RECTANGLE' && 'fills' in existing) {
-      existing.fills = [{ type: 'IMAGE', scaleMode: 'CROP', imageHash: image.hash }];
-      figma.notify('已更新新建图层的 PS 结果「' + target.name + '」', { timeout: 3000 });
-      return;
-    }
-    // RECTANGLE 被用户删了 → 走第一次新建流程（resultLayerId 会被覆盖更新）
-  }
+  const absBox = target.absoluteBoundingBox;
+  if (!absBox) throw new Error('无法获取原节点位置');
 
-  // --- 第一次新建 ---
-  // 1) 隐藏原 fill（完整原图还在里面，visible=false 不丢）
   fills[index] = { ...fills[index], visible: false };
   target.fills = fills;
 
-  // 2) 切到原图层所在页面（figma.group 会把 target 移进去，不切页新画框可能跑到别的页面）
   const page = pageOf(target);
-  if (page && page.id !== figma.currentPage.id) {
-    await figma.setCurrentPageAsync(page);
-  }
+  if (page && page.id !== figma.currentPage.id) await figma.setCurrentPageAsync(page);
 
-  const container = containerFor(target);
-  const box = target.absoluteBoundingBox;
+  const frame = figma.createFrame();
+  frame.name = 'PS 结果_' + (meta.targetName || target.name);
+  frame.layoutMode = 'NONE';
+  frame.x = absBox.x;
+  frame.y = absBox.y;
+  frame.resize(Math.max(1, absBox.width), Math.max(1, absBox.height));
+  frame.fills = [];
+  frame.strokes = [];
+  frame.clipsContent = false;
 
-  // 3) figma.group 把 target（已隐藏 fill）移进新 group，group 追加到原容器
-  // figma.group 会自动把 group 原点放在传入节点 bounding box 的左上角，
-  // 所以 target 在 group 里会自动对齐到 (0,0) —— 正好和新建的 RECTANGLE 叠一起
-  const group = figma.group([target], container.node);
-  group.name = 'PS 结果_' + (meta.targetName || target.name);
+  frame.appendChild(target);
+  target.x = 0;
+  target.y = 0;
 
-  // 4) auto-layout 容器里 group 默认会被当作 item 排到末尾 → 强制绝对定位并还原原位置
-  if ('layoutMode' in container.node && container.node.layoutMode && container.node.layoutMode !== 'NONE') {
-    try { group.layoutPositioning = 'ABSOLUTE'; } catch (err) { /* 老 API 忽略 */ }
-  }
-  if (box) {
-    group.x = box.x - container.originX;
-    group.y = box.y - container.originY;
-  }
-
-  // 5) 新建 RECTANGLE 放进 group，和 target 叠一起（都是 0,0）
   const rect = figma.createRectangle();
   rect.name = (meta.targetName || target.name) + ' (PS)';
   rect.resize(
     Math.max(1, Math.round(meta.nodeWidth || target.width)),
     Math.max(1, Math.round(meta.nodeHeight || target.height))
   );
-  rect.fills = [{ type: 'IMAGE', scaleMode: 'CROP', imageHash: image.hash }];
+  rect.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageTransform: [[1, 0, 0], [0, 1, 0]], imageHash: image.hash }];
   rect.x = 0;
   rect.y = 0;
-  group.appendChild(rect);
+  frame.appendChild(rect);
 
-  // 6) 定位 + 通知
-  try {
-    await ensureVisible(group);
-  } catch (err) { /* 忽略 */ }
+  try { await ensureVisible(frame); } catch (err) {}
   figma.notify('新建模式：已回写并隐藏原图层「' + target.name + '」', { timeout: 4000 });
 
-  // 告诉 UI：记下这次新建的 groupId/layerId，下次同任务回传直接更新
-  // 注意不发 fallback-created（它会改 targetId），新建模式 targetId 保持原图层
   figma.ui.postMessage({
     type: 'newlayer-created',
     jobId: msg.jobId || '',
-    groupId: group.id,
+    groupId: frame.id,
     layerId: rect.id
   });
 }

@@ -595,41 +595,6 @@
     });
   }
 
-  /** 从原始图 base64 里按 cropX/Y/W/H 裁出一块，保持原始分辨率；失败返回空串让调用方回退到原图 */
-  function cropOriginalImage(b64, cropX, cropY, cropW, cropH) {
-    return new Promise(function (resolve) {
-      var done = false;
-      function finish(value) { if (done) return; done = true; resolve(value || ''); }
-      try {
-        var img = new Image();
-        img.onload = function () {
-          try {
-            var canvas = document.createElement('canvas');
-            canvas.width = Math.max(1, cropW);
-            canvas.height = Math.max(1, cropH);
-            var ctx = canvas.getContext('2d');
-            // canvas.drawImage(image, sx, sy, sWidth, sHeight, dx, dy, dWidth, dHeight)
-            ctx.drawImage(img, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-            // toBlob 异步回调：等它给我们 Blob 再转 base64
-            canvas.toBlob(function (blob) {
-              if (!blob) { finish(''); return; }
-              var reader = new FileReader();
-              reader.onload = function () {
-                var url = reader.result; // data:image/png;base64,xxx
-                finish(url ? url.replace(/^data:image\/\w+;base64,/, '') : '');
-              };
-              reader.onerror = function () { finish(''); };
-              reader.readAsDataURL(blob);
-            }, 'image/png');
-          } catch (e) { finish(''); }
-        };
-        img.onerror = function () { finish(''); };
-        img.src = 'data:image/png;base64,' + b64;
-      } catch (e) { finish(''); return; }
-      setTimeout(function () { finish(''); }, 8000); // 大图解码/裁图兜底
-    });
-  }
-
   // ---------------- 注册表 ----------------
 
   function normalizeValue(value) {
@@ -945,20 +910,6 @@
       return;
     }
 
-    // 裁剪模式：主线程发来的是完整原图 bytes + 裁剪矩形，
-    // 这里用 canvas 在原始分辨率下裁出 Figma 可见的那块再上传
-    if (meta.mode === 'crop' && meta.cropW && meta.cropH) {
-      var cropped = await cropOriginalImage(data, meta.cropX || 0, meta.cropY || 0, meta.cropW, meta.cropH);
-      if (cropped) {
-        data = cropped;
-        log('「' + displayName + '」裁剪模式：从 ' + (meta.originalWidth || '?') + '×' + (meta.originalHeight || '?') +
-          ' 裁出 ' + meta.cropW + '×' + meta.cropH, true);
-      } else {
-        // canvas 裁失败（极少见，比如原图太大爆内存）：退回上传完整原图
-        log('「' + displayName + '」canvas 裁图失败，退回完整原图（回写时可能外观有变化）', true);
-      }
-    }
-
     var finalMeta = Object.assign({}, meta, { client: 'figma' });
     var res = await fetch(base + '/api/jobs', {
       method: 'POST',
@@ -1215,6 +1166,10 @@
             targetName: meta.targetName,
             paintIndex: meta.paintIndex,
             fallback: meta.fallback,
+            mode: meta.mode,
+            newLayer: meta.newLayer,
+            multiImage: meta.multiImage,
+            resultLayerId: meta.resultLayerId,
             imageWidth: meta.imageWidth,
             imageHeight: meta.imageHeight,
             nodeWidth: meta.nodeWidth,
